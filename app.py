@@ -241,12 +241,15 @@ if geo_df is None or geo_df.empty:
     st.stop()
 
 
-# -------------------- MAPA (render tylko gdy zmieniły się dane) --------------------
+# -------------------- MAPA (buduj tylko gdy zmieniły się dane, ale renderuj zawsze) --------------------
 def df_hash(df_in: pd.DataFrame) -> str:
     return hashlib.md5(pd.util.hash_pandas_object(df_in, index=True).values).hexdigest()
 
 current_hash = df_hash(geo_df)
-if st.session_state.get("map_hash") != current_hash:
+
+need_rebuild = st.session_state.get("map_hash") != current_hash or ("map_obj" not in st.session_state)
+
+if need_rebuild:
     m = folium.Map(location=[geo_df["lat"].mean(), geo_df["lon"].mean()], zoom_start=8)
     cluster = MarkerCluster().add_to(m)
 
@@ -269,8 +272,13 @@ if st.session_state.get("map_hash") != current_hash:
             popup=folium.Popup(popup_html, max_width=350)
         ).add_to(cluster)
 
-    st_folium(m, height=700, key="mapview")
+    # zapamiętaj gotową mapę + hash
+    st.session_state["map_obj"] = m
     st.session_state["map_hash"] = current_hash
+
+# RENDERUJ ZAWSZE (niezależnie, czy przebudowano)
+st_folium(st.session_state["map_obj"], height=700, key="mapview")
+
 
 # -------------------- EKSPORT / ZAPIS --------------------
 with st.expander("💾 Eksport / Zapis"):
