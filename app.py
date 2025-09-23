@@ -59,6 +59,22 @@ def load_google_csv(url: str) -> pd.DataFrame:
     except Exception as e:
         raise RuntimeError(f"Nie udało się wczytać danych z Google Sheets: {e}")
 
+@st.cache_data(show_spinner=False)
+def geocode_many(addresses: list[str]) -> dict[str, tuple[float, float] | None]:
+    """Zwraca słownik: adres -> (lat, lon) lub None. Cache’uje wyniki."""
+    geolocator = Nominatim(user_agent="mroauto-excel-map (contact: info@mroauto.cz)")
+    geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1, swallow_exceptions=True)
+    results = {}
+    progress = st.progress(0)
+    n = len(addresses)
+    for i, addr in enumerate(addresses, start=1):
+        loc = geocode(addr)
+        if loc:
+            results[addr] = (loc.latitude, loc.longitude)
+        else:
+            results[addr] = None
+        progress.progress(i / n)
+    return results
 
 # ---------- UI ----------
 col1, col2 = st.columns([1,1])
@@ -125,16 +141,68 @@ with st.spinner("Przygotowuję współrzędne… (jeśli brak lat/lon, geokodowa
         df["lon"] = df["lon"].apply(to_float)
         geo_df = df.dropna(subset=["lat","lon"]).copy()
         skipped = len(df) - len(geo_df)
-    else:
-        # Użyj OpenCage/OSM geocodingu tylko jeśli naprawdę potrzebujesz.
-        # Na darmowym hostingu Nominatim jest wolny i limitowany — lepiej raz dodać lat/lon w pliku.
-        # Tu dla bezpieczeństwa NIE geokodujemy online (żeby nie blokować appki i nie wpaść w limity).
-        st.warning("Brak kolumn lat/lon — mapę mogę narysować, ale potrzebuję współrzędnych. "
-                   "Dodaj lat/lon do pliku (albo daj znać, to włączę wolne, darmowe geokodowanie OSM).")
-        geo_df = df.copy()
-        geo_df["lat"] = None
-        geo_df["lon"] = None
-        skipped = len(geo_df)
+else:
+    st.warning("Brak kolumn lat/lon — mogę policzyć współrzędne z adresów (wolne, darmowe geokodowanie OSM).")
+    # przygotuj adresy (jeśli masz kolumnę 'Kraj', możesz dodać ją do adresu)
+    df["FullAddress"] = build_full_address(df)
+    df = df[df["FullAddress"].str.len() > 0].copy()
+
+    # ogranicz jednorazową liczbę do, np., 300 rekordów (żeby nie zajechać OSM)
+    max_rows = 300
+    if len(df) > max_rows:
+        st.info(f"Masz {len(df)} wierszy. Dla bezpieczeństwa geokoduję pierwsze {max_rows}. "
+                f"Możesz dodać lat/lon do pliku, by pominąć limit.")
+    to_geo = df["FullAddress"].head(max_rows).tolist()
+
+    if st.button("📍 Geokoduj adresy (OSM)"):
+        with st.spinner("Geokoduję przez OpenStreetMap/Nominatim… (ok. 1 adres/sek)"):
+            geo = geocode_many(to_geo)
+
+        df["lat"] = df["FullAddress"].map(lambda a: geo.get(a, (None, None))[0] if geo.get(a) else None)
+        df["lon"] = df["FullAddress"].map(lambda a: geo.get(a, (None, None))[1] if geo.get(a) else None)
+
+        got = df[["lat","lon"]].dropna().shape[0]
+        st.success(f"Gotowe. Znaleziono współrzędne dla {got} z {len(to_geo)} adresów.")
+
+        geo_df = df.dropna(subset=["lat","lon"]).copy()
+        if geo_df.empty:
+            st.error("Nie udało się uzyskać żadnych współrzędnych — sprawdź, czy adresy są kompletne (ulica, miasto, kod).")
+            st.stop()
+
+        # rysuj mapę (Twój dotychczasowy kod od rysowania, np. folium + st_folium)
+        m = folium.Map(location=[geo_df["lat"].mean(), geo_df["lon"].mean()], zoom_start=8)
+        cluster = MarkerCluster().add_to(m)
+
+        def val(col, row, default=""):
+            return row[col] if col in geo_df.columns and pd.notna(row[col]) else default
+
+        for _, r in geo_df.iterrows():
+            popup_html = f"""
+            <div style="font-size:14px">
+              <b>{val('Nazwa odbiorcy', r)}</b><br>
+              {('Obrót: {:,.2f} CZK'.format(val('Obrót w czk', r)) if pd.notna(val('Obrót w czk', r)) else '')}<br>
+              {('Email: ' + val('email', r)) if val('email', r) else ''}<br>
+              Adres: {r['FullAddress']}
+            </div>
+            """
+            folium.Marker([r["lat"], r["lon"]], tooltip=val('Nazwa odbiorcy', r) or "Klient",
+                          popup=folium.Popup(popup_html, max_width=350)).add_to(cluster)
+
+        st_folium(m, height=700)
+
+        with st.expander("💾 Eksport"):
+            st.download_button(
+                "Pobierz CSV z geokodowanymi współrzędnymi",
+                data=df.to_csv(index=False).encode("utf-8"),
+                file_name="geokodowane_dane.csv",
+                mime="text/csv"
+            )
+        st.stop()
+
+    # Jeżeli użytkownik nie kliknął przycisku — pokaż neutralną mapę
+    m = folium.Map(location=[49.8, 18.2], zoom_start=7)
+    st_folium(m, height=500)
+    st.stop()
 
 if geo_df.empty:
     st.error("Brak wierszy z poprawnymi danymi.")
