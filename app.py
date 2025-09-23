@@ -10,6 +10,8 @@ from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
 import requests
+import streamlit.components.v1 as components
+
 
 # -------------------- KONFIG --------------------
 GOOGLE_SHEETS_CSV = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSijSBg7JqZkg4T8aY56FEhox0pqw5huE7oWRmSbaB25LJj9nFyo76JLPKSXHZecd4nZEyu92jesaor/pub?gid=0&single=true&output=csv"
@@ -241,43 +243,33 @@ if geo_df is None or geo_df.empty:
     st.stop()
 
 
-# -------------------- MAPA (buduj tylko gdy zmieniły się dane, ale renderuj zawsze) --------------------
-def df_hash(df_in: pd.DataFrame) -> str:
-    return hashlib.md5(pd.util.hash_pandas_object(df_in, index=True).values).hexdigest()
+# -------------------- MAPA (stabilny render przez HTML) --------------------
+# budujemy mapę ZA KAŻDYM przebiegiem (lekko wolniej, ale bez migania)
+m = folium.Map(location=[geo_df["lat"].mean(), geo_df["lon"].mean()], zoom_start=8)
+cluster = MarkerCluster().add_to(m)
 
-current_hash = df_hash(geo_df)
+def val(col, row, default=""):
+    return row[col] if col in geo_df.columns and pd.notna(row[col]) else default
 
-need_rebuild = st.session_state.get("map_hash") != current_hash or ("map_obj" not in st.session_state)
+for _, r in geo_df.iterrows():
+    amount_text = fmt_czk(val('Obrót w czk', r))
+    popup_html = f"""
+    <div style="font-size:14px">
+      <b>{val('Nazwa odbiorcy', r)}</b><br>
+      {amount_text}<br>
+      {('Email: ' + val('email', r)) if val('email', r) else ''}<br>
+      {('Adres: ' + val('FullAddress', r)) if 'FullAddress' in geo_df.columns else ''}
+    </div>
+    """
+    folium.Marker(
+        [r["lat"], r["lon"]],
+        tooltip=val('Nazwa odbiorcy', r) or "Klient",
+        popup=folium.Popup(popup_html, max_width=350)
+    ).add_to(cluster)
 
-if need_rebuild:
-    m = folium.Map(location=[geo_df["lat"].mean(), geo_df["lon"].mean()], zoom_start=8)
-    cluster = MarkerCluster().add_to(m)
-
-    def val(col, row, default=""):
-        return row[col] if col in geo_df.columns and pd.notna(row[col]) else default
-
-    for _, r in geo_df.iterrows():
-        amount_text = fmt_czk(val('Obrót w czk', r))
-        popup_html = f"""
-        <div style="font-size:14px">
-          <b>{val('Nazwa odbiorcy', r)}</b><br>
-          {amount_text}<br>
-          {('Email: ' + val('email', r)) if val('email', r) else ''}<br>
-          {('Adres: ' + val('FullAddress', r)) if 'FullAddress' in geo_df.columns else ''}
-        </div>
-        """
-        folium.Marker(
-            [r["lat"], r["lon"]],
-            tooltip=val('Nazwa odbiorcy', r) or "Klient",
-            popup=folium.Popup(popup_html, max_width=350)
-        ).add_to(cluster)
-
-    # zapamiętaj gotową mapę + hash
-    st.session_state["map_obj"] = m
-    st.session_state["map_hash"] = current_hash
-
-# RENDERUJ ZAWSZE (niezależnie, czy przebudowano)
-st_folium(st.session_state["map_obj"], height=700, key="mapview")
+# render stabilny – bez „migania” streamlit_folium
+html_map = m.get_root().render()
+components.html(html_map, height=700, scrolling=False)
 
 
 # -------------------- EKSPORT / ZAPIS --------------------
