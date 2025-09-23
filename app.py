@@ -48,7 +48,7 @@ def build_full_address(row: pd.Series) -> str:
     parts = [str(row.get("Adres", "")).strip(),
              str(row.get("Miasto", "")).strip(),
              str(row.get("PSC", "")).strip(),
-             "Czechy"]  # możesz zmienić/dostawiać kraj, jeśli masz też PL itd.
+             "Czechy", "PL"]  # możesz zmienić/dostawiać kraj, jeśli masz też PL itd.
     return ", ".join([p for p in parts if p])
 
 
