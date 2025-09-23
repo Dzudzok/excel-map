@@ -103,8 +103,22 @@ def save_to_google_sheet(df_to_save: pd.DataFrame) -> bool:
             ws = sh.worksheet(WORKSHEET_NAME)
         except gspread.WorksheetNotFound:
             ws = sh.add_worksheet(title=WORKSHEET_NAME, rows="2000", cols="50")
-        set_with_dataframe(ws, df_to_save, include_index=False, include_column_header=True)
-        return True
+        from gspread.exceptions import APIError
+        for attempt in range(5):
+            try:
+                set_with_dataframe(ws, df_to_save, include_index=False, include_column_header=True)
+                return True
+            except APIError as e:
+                msg = str(e)
+                code = getattr(getattr(e, 'response', None), 'status_code', None)
+                if code == 429 or ('Quota exceeded' in msg):
+                    wait = min(32, 2 ** attempt)
+                    st.warning(f"Przekroczono limit Google Sheets (429). Ponawiam za {wait}s… [próba {attempt+1}/5]")
+                    time.sleep(wait)
+                    continue
+                raise
+        st.error("Przekroczono limit Google Sheets – nie udało się zapisać po 5 próbach.")
+        return False
     except Exception as e:
         st.error(f"Nie udało się zapisać do Google Sheets: {e}")
         return False
@@ -218,7 +232,7 @@ needs_geo_idx = df.index[needs_geo_mask]
 
 # ===================== PODGLĄD =====================
 st.subheader("Podgląd danych")
-st.dataframe(df.head(50), use_container_width=True)
+st.dataframe(df.head(50), width="stretch")
 
 # ===================== GEOKODOWANIE =====================
 if len(needs_geo_idx) > 0:
