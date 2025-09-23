@@ -2,6 +2,9 @@ streamlit
 pandas
 openpyxl
 folium
-geopy
 requests
 streamlit-folium
+geopy
+gspread
+gspread-dataframe
+google-auth
