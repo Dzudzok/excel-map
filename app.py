@@ -2,6 +2,7 @@ import math
 import time
 import hashlib
 from typing import Tuple, Optional
+import streamlit.components.v1 as components
 
 import pandas as pd
 import streamlit as st
@@ -265,12 +266,22 @@ if ENABLE_WRITE_BACK:
     else:
         st.caption("Współrzędne zapiszą się dopiero po kliknięciu przycisku.")
 
+FAST_RENDER = st.toggle("🚀 Tryb szybki (bez odświeżania przy ruchu mapy)", value=True,
+                        help="Wyświetla mapę jako statyczny HTML — płynne przesuwanie bez rerunów. "
+                             "Wyłącz, jeśli potrzebujesz interakcji zwrotnych z mapy (np. odczyt bounds).")
+
 
 # Mapa
 st.markdown("### Mapa")
 m = make_map(df_geo)
-from streamlit_folium import st_folium  # wymaga: pip install streamlit-folium
-st_folium(m, width=None, height=700)
+if FAST_RENDER:
+    # Statyczny HTML — zero rerunów przy pan/zoom
+    components.html(m.get_root().render(), height=700, scrolling=False)
+else:
+    # Interaktywny tryb (może „migać”, bo wysyła eventy do Streamlita)
+    from streamlit_folium import st_folium
+    st_folium(m, width=None, height=700, key="live_map")
+
 
 # Podsumowanie
 missing_after = df_geo["lat"].isna() | df_geo["lon"].isna()
