@@ -118,13 +118,15 @@ with c4:
 if reset:
     for k in ["_use_google", "geo_df", "map_hash", "data_hash", "geocoded_done"]:
         st.session_state.pop(k, None)
-    st.experimental_rerun()
+    st.rerun()   # zamiast st.experimental_rerun()
+
 
 if go_btn:
     st.session_state["_use_google"] = True
     for k in ["geo_df", "map_hash", "data_hash", "geocoded_done"]:
         st.session_state.pop(k, None)
-    st.experimental_rerun()  # << DODANE
+    st.rerun()   # zamiast st.experimental_rerun()
+
 
 
 use_google = st.session_state.get("_use_google", True)  # domyślnie czytaj z Google
