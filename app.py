@@ -127,6 +127,16 @@ if go_btn:
         st.session_state.pop(k, None)
     st.rerun()   # zamiast st.experimental_rerun()
 
+# ... po geokodowaniu i próbie zapisu:
+saved_ok = save_to_google_sheet(df)  # tu zapisujesz cały df albo geo_df – jak masz w kodzie
+
+if saved_ok:
+    st.success(f"Zapisano geokody do Google Sheets (zakładka: {WORKSHEET_NAME}). Przeładowuję…")
+else:
+    st.info("Geokodowanie gotowe lokalnie. (Zapis do Sheets nieudany/pominięty). Przeładowuję…")
+
+st.rerun()
+
 
 
 use_google = st.session_state.get("_use_google", True)  # domyślnie czytaj z Google
