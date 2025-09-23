@@ -41,25 +41,45 @@ def build_full_address(df: pd.DataFrame) -> pd.Series:
     return (a + ", " + m + " " + p).str.strip(", ").str.strip()
 
 def load_from_url(url: str) -> pd.DataFrame:
-    # Google Sheets "share" URL → CSV export
-    gs = re.match(r"https://docs\.google\.com/spreadsheets/d/([a-zA-Z0-9-_]+)", url)
-    if gs:
-        sheet_csv = f"https://docs.google.com/spreadsheets/d/{gs.group(1)}/export?format=csv"
-        return pd.read_csv(sheet_csv)
+    import requests, io, re
 
-    # inne: spróbuj CSV, a jeśli nie, to xlsx
+    # 1) Google Sheets: akceptujemy różne formaty linku i budujemy CSV export
+    m = re.match(r"https://docs\.google\.com/spreadsheets/d/([a-zA-Z0-9-_]+)", url)
+    if m:
+        # wyciągnij gid, jeśli jest
+        gid_match = re.search(r"[?&#]gid=(\d+)", url)
+        gid = gid_match.group(1) if gid_match else "0"
+        sheet_csv = f"https://docs.google.com/spreadsheets/d/{m.group(1)}/export?format=csv&gid={gid}"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        r = requests.get(sheet_csv, timeout=30, headers=headers)
+        if r.status_code != 200:
+            raise RuntimeError(f"Google Sheets HTTP {r.status_code} – upewnij się, że używasz 'Publish to the web' → CSV.")
+        return pd.read_csv(io.StringIO(r.text))
+
+    # 2) OneDrive/SharePoint (spróbuj wymusić pobranie)
+    if ("1drv.ms" in url) or ("sharepoint.com" in url):
+        if "download=1" not in url:
+            url = url + ("&download=1" if "?" in url else "?download=1")
+
+    # 3) Ogólne pobieranie: spróbuj najpierw CSV, potem XLSX po bajtach
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
         if url.lower().endswith(".csv"):
-            return pd.read_csv(url)
-        else:
-            # pandas umie czytać xlsx z URL, ale czasem lepiej pobrać bajty
-            import requests
-            r = requests.get(url, timeout=30)
+            r = requests.get(url, timeout=30, headers=headers)
             r.raise_for_status()
-            return pd.read_excel(io.BytesIO(r.content))
+            return pd.read_csv(io.StringIO(r.text))
+        else:
+            r = requests.get(url, timeout=30, headers=headers)
+            r.raise_for_status()
+            # próbujemy xlsx z bajtów
+            try:
+                return pd.read_excel(io.BytesIO(r.content))
+            except Exception:
+                # a jeśli to jednak CSV pod dziwnym rozszerzeniem – też obsłuż
+                return pd.read_csv(io.StringIO(r.text))
     except Exception as e:
-        st.error(f"Nie udało się wczytać danych z URL: {e}")
-        st.stop()
+        raise RuntimeError(f"Nie udało się wczytać danych z URL. Upewnij się, że link jest PUBLICZNY i wskazuje CSV/XLSX. Szczegóły: {e}")
+
 
 @st.cache_data(show_spinner=False)
 def geocode_address(addr: str):
