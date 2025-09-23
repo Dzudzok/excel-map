@@ -145,7 +145,7 @@ if "FullAddress" not in df.columns:
 else:
     # jeśli w arkuszu było puste/"None"/"nan" – nadpisz tymczasowo zbudowaną wartością
     mask_blank = df["FullAddress"].astype(str).str.strip().isin(["", "None", "nan", "NaN", "NONE"]) | df["FullAddress"].isna()
-    df.loc[mask_blank, "FullAddress"] = built_full[mask_blank]
+    df.loc[mask_blank, "FullAddress"] = built_full[mask_blank].astype(str)
 
 # Wszystkie rekordy wymagają geokodowania
 st.subheader("Podgląd danych")
