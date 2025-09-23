@@ -13,8 +13,9 @@ import requests
 
 # -------------------- KONFIG --------------------
 GOOGLE_SHEETS_CSV = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSijSBg7JqZkg4T8aY56FEhox0pqw5huE7oWRmSbaB25LJj9nFyo76JLPKSXHZecd4nZEyu92jesaor/pub?gid=0&single=true&output=csv"
-SPREADSHEET_ID = st.secrets.get("SPREADSHEET_ID", "")        # .../spreadsheets/d/<ID>/edit
-WORKSHEET_NAME = st.secrets.get("WORKSHEET_NAME", "Arkusz1")
+
+SPREADSHEET_ID  = st.secrets.get("SPREADSHEET_ID", "")        # .../spreadsheets/d/<ID>/edit
+WORKSHEET_NAME  = st.secrets.get("WORKSHEET_NAME", "Arkusz1")  # zakładka do nadpisania
 
 st.set_page_config(page_title="Mapa klientów z Excela / Google Sheets", layout="wide")
 st.title("📍 Mapa klientów z Excela / Google Sheets (online, free)")
@@ -70,6 +71,7 @@ def load_google_csv(url: str) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def geocode_one(address: str):
+    # dodaj kraj w razie potrzeby: address + ", Czechia"
     geolocator = Nominatim(user_agent="mroauto-excel-map (contact: info@mroauto.cz)")
     geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1, swallow_exceptions=True)
     loc = geocode(address)
@@ -100,32 +102,30 @@ def save_to_google_sheet(df_to_save: pd.DataFrame):
         return False
 
 def df_hash(df: pd.DataFrame) -> str:
-    # stabilny hash treści danych do kontroli rerenderu
     return hashlib.md5(pd.util.hash_pandas_object(df, index=True).values).hexdigest()
 
 # -------------------- UI --------------------
-c1, c2, c3 = st.columns([1,1,1])
+c1, c2, c3, c4 = st.columns([1,1,1,1])
 with c1:
     uploaded = st.file_uploader("Wgraj plik (Excel/CSV)", type=["xlsx", "csv"])
 with c2:
     go_btn = st.button("⬇️ Pobierz z Google (stały link)")
 with c3:
-    auto_geocode = st.checkbox("Auto-geokoduj, jeśli brak lat/lon", value=False)
+    auto_geocode = st.checkbox("Auto-geokoduj, jeśli brak lat/lon", value=True)
+with c4:
+    reset = st.button("♻️ Reset (wyczyść)")
 
-# Guzik Reset (czyści stan, pomaga przy testach)
-reset = st.button("♻️ Reset (wyczyść wyniki)")
 if reset:
-    for k in ["_use_google", "geo_df", "map_hash", "data_hash"]:
+    for k in ["_use_google", "geo_df", "map_hash", "data_hash", "geocoded_done"]:
         st.session_state.pop(k, None)
     st.experimental_rerun()
 
 if go_btn:
     st.session_state["_use_google"] = True
-    # nowy import = wyczyść poprzednie
-    for k in ["geo_df", "map_hash", "data_hash"]:
+    for k in ["geo_df", "map_hash", "data_hash", "geocoded_done"]:
         st.session_state.pop(k, None)
 
-use_google = st.session_state.get("_use_google", False)
+use_google = st.session_state.get("_use_google", True)  # domyślnie czytaj z Google
 
 # -------------------- DANE --------------------
 df = None
@@ -134,11 +134,11 @@ if uploaded is not None and not use_google:
         df = pd.read_csv(uploaded)
     else:
         df = pd.read_excel(uploaded)
-elif use_google:
+else:
     df = load_google_csv(GOOGLE_SHEETS_CSV)
 
 if df is None or df.empty:
-    st.info("Wgraj plik lub kliknij „Pobierz z Google (stały link)”.")
+    st.info("Brak danych – wrzuć plik albo użyj przycisku Google.")
     st.stop()
 
 st.subheader("Podgląd danych")
@@ -177,16 +177,18 @@ if has_coords and geo_df is None:
     geo_df = df.dropna(subset=["lat", "lon"]).copy()
     st.session_state["geo_df"] = geo_df.to_dict(orient="records")
 
-# -------------------- GEOKODOWANIE --------------------
+# -------------------- AUTO-GEOKODOWANIE + ZAPIS --------------------
 if not has_coords and geo_df is None:
-    st.warning("Brak kolumn lat/lon — mogę policzyć współrzędne (OSM/Nominatim, ~1 zapytanie/s).")
+    st.warning("Brak kolumn lat/lon – mogę policzyć współrzędne (OSM, ~1 zapytanie/s).")
     max_rows = 300
     if len(df) > max_rows:
         st.info(f"Adresów: {len(df)}. Dla bezpieczeństwa geokoduję pierwsze {max_rows}.")
     to_geo = df["FullAddress"].head(max_rows).tolist()
 
+    # wyzwalacz: auto lub ręcznie
     trigger = auto_geocode or st.button("📍 Geokoduj adresy (OSM)", key="btn_geocode")
-    if trigger:
+
+    if trigger and not st.session_state.get("geocoded_done", False):
         results = []
         prog = st.progress(0.0)
         for i, addr in enumerate(to_geo, start=1):
@@ -200,16 +202,38 @@ if not has_coords and geo_df is None:
         df["lon"] = df["FullAddress"].map(lambda a: mapping.get(a, (None, None))[1] if mapping.get(a) else None)
         geo_df = df.dropna(subset=["lat", "lon"]).copy()
 
+        # 1) zapisz do session_state
         st.session_state["geo_df"] = geo_df.to_dict(orient="records")
-        st.success(f"Znaleziono współrzędne dla {geo_df.shape[0]} / {len(to_geo)} adresów.")
+        st.session_state["geocoded_done"] = True
+
+        # 2) spróbuj zapisać do Google Sheets (opcjonalnie)
+        saved_ok = False
+        try:
+            # scal wiersze geokodowane z oryginałem (jeśli limit < wszystkich)
+            if len(df) < len(load_google_csv(GOOGLE_SHEETS_CSV)):
+                # read full published to keep columns; w razie różnic najlepiej docelowo pisać do pliku bazowego (SPREADSHEET_ID)
+                pass
+            # zapisujemy to, co mamy (w praktyce cały df z lat/lon)
+            saved_ok = save_to_google_sheet(df)
+        except Exception:
+            saved_ok = False
+
+        if saved_ok:
+            st.success(f"Geokodowanie zapisane do Google Sheets (zakładka: {WORKSHEET_NAME}). Przeładowuję…")
+        else:
+            st.info("Geokodowanie gotowe lokalnie. (Zapis do Sheets nieudany lub pominięty). Przeładowuję…")
+
         st.experimental_rerun()
 
-# Jeśli dalej nie mamy współrzędnych – pokaż ramkę z instrukcją, ale NIE rysuj neutralnej mapy, by nie przykrywać
+# Jeśli dalej nie mamy współrzędnych – stop (nie rysuj neutralnej mapy, by nie „migała”)
 if geo_df is None or geo_df.empty:
-    st.info("Brak gotowych współrzędnych. Użyj geokodowania albo dodaj kolumny 'lat' i 'lon' w arkuszu.")
+    st.info("Brak gotowych współrzędnych. Jeśli włączyłeś Auto-geokoduj, odśwież się po zakończeniu.")
     st.stop()
 
 # -------------------- MAPA (render tylko gdy zmieniły się dane) --------------------
+def df_hash(df_in: pd.DataFrame) -> str:
+    return hashlib.md5(pd.util.hash_pandas_object(df_in, index=True).values).hexdigest()
+
 current_hash = df_hash(geo_df)
 if st.session_state.get("map_hash") != current_hash:
     m = folium.Map(location=[geo_df["lat"].mean(), geo_df["lon"].mean()], zoom_start=8)
@@ -234,28 +258,18 @@ if st.session_state.get("map_hash") != current_hash:
             popup=folium.Popup(popup_html, max_width=350)
         ).add_to(cluster)
 
-    with map_slot:
-        st_folium(m, height=700, key="mapview")
-
+    st_folium(m, height=700, key="mapview")
     st.session_state["map_hash"] = current_hash
-else:
-    # nic się nie zmieniło – nie przebudowuj mapy
-    with map_slot:
-        st_folium(folium.Map(), height=1, key="mapview")  # utrzymaj widget, ale nie renderuj ciężkiej mapy ponownie
-        st.write("")  # no-op
 
 # -------------------- EKSPORT / ZAPIS --------------------
 with st.expander("💾 Eksport / Zapis"):
     st.download_button(
-        "Pobierz CSV z lat/lon",
+        "Pobierz CSV z lat/lon (to, co rysuje mapa)",
         data=geo_df.to_csv(index=False).encode("utf-8"),
         file_name="geokodowane_dane.csv",
         mime="text/csv"
     )
-    html = folium.Map().get_root().render()  # placeholder by uniknąć rerunów od renderu m.get_root()
-    # jeśli chcesz realny eksport HTML ostatniej mapy, trzymaj m w session_state i tu go użyj
-
-    if st.button("📤 Zapisz do Google Sheets (nadpisze zakładkę)"):
+    if st.button("📤 Zapisz do Google Sheets teraz (nadpisze zakładkę)"):
         ok = save_to_google_sheet(geo_df)
         if ok:
             st.success("Zapisano do Google Sheets ✅")
