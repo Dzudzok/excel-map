@@ -12,6 +12,9 @@ from geopy.extra.rate_limiter import RateLimiter
 
 # === USTAWIENIA ===
 st.set_page_config(page_title="Mapa klientów z Excela / Google Sheets", layout="wide")
+if "saved_latlon_keys" not in st.session_state:
+    st.session_state["saved_latlon_keys"] = set()
+
 
 # 1) ŹRÓDŁO CSV — użyj secrets albo stałej
 CSV_URL = st.secrets.get(
@@ -45,8 +48,19 @@ def build_full_address(row: pd.Series) -> str:
     parts = [str(row.get("Adres", "")).strip(),
              str(row.get("Miasto", "")).strip(),
              str(row.get("PSC", "")).strip(),
-             "Czechy"]  # możesz zmienić/dostawiać kraj, jeśli masz też PL itd.
+             "Czechy","Polska"]  # możesz zmienić/dostawiać kraj, jeśli masz też PL itd.
     return ", ".join([p for p in parts if p])
+
+
+
+def row_key(row: pd.Series) -> str:
+    # Klucz oparty o pełny adres + nazwę odbiorcy
+    base = (build_full_address(row) + "|" + str(row.get("Nazwa odbiorcy",""))).strip()
+    return hashlib.sha1(base.encode("utf-8")).hexdigest()
+
+        # Pomijaj rekordy, które w tej sesji już zapisaliśmy:
+        if row_key(out.loc[idx]) in st.session_state["saved_latlon_keys"]:
+            continue
 
 @st.cache_data(show_spinner=False)
 def geocode_one(address: str) -> Optional[Tuple[float, float]]:
@@ -133,14 +147,18 @@ def write_back_latlon(original: pd.DataFrame, updated: pd.DataFrame) -> int:
     # GSpread ma indeks wierszy 1-based (1 = nagłówki). Zakładamy, że kolejność w CSV == kolejność w arkuszu
     updated_rows = 0
     for i, (idx, row) in enumerate(updated.iterrows(), start=2):  # 2 = pierwszy wiersz danych
-        if changed_mask.loc[idx]:
-            lat_val = float(row["lat"])
-            lon_val = float(row["lon"])
-            ws.update_cell(i, col_lat, lat_val)
-            ws.update_cell(i, col_lon, lon_val)
-            updated_rows += 1
-            # Niewielkie opóźnienie, aby nie „młotkować” API
-            time.sleep(0.2)
+        if not changed_mask.loc[idx]:
+            continue
+        key = row_key(row)
+        if key in st.session_state["saved_latlon_keys"]:
+            continue  # już zapisane w tej sesji
+        lat_val = float(row["lat"])
+        lon_val = float(row["lon"])
+        ws.update_cell(i, col_lat, lat_val)
+        ws.update_cell(i, col_lon, lon_val)
+        st.session_state["saved_latlon_keys"].add(key)
+        updated_rows += 1
+        time.sleep(0.2)
 
     return updated_rows
 
@@ -201,11 +219,20 @@ df_geo = geocode_missing(df_orig)
 # Opcjonalny zapis do arkusza
 updated_rows = 0
 if ENABLE_WRITE_BACK:
-    with st.spinner("Zapisuję nowe współrzędne do Google Sheets…"):
-        try:
-            updated_rows = write_back_latlon(df_orig, df_geo)
-        except Exception as e:
-            st.warning(f"Nie udało się zapisać do arkusza: {e}")
+    st.markdown("### Zapis do Google Sheets")
+    if st.button("💾 Zapisz nowe współrzędne do arkusza"):
+        with st.spinner("Zapisuję nowe współrzędne do Google Sheets…"):
+            try:
+                updated_rows = write_back_latlon(df_orig, df_geo)
+                if updated_rows == 0:
+                    st.success("Brak nowych współrzędnych do zapisania.")
+                else:
+                    st.success(f"Zaktualizowano w arkuszu: {updated_rows} wierszy.")
+            except Exception as e:
+                st.warning(f"Nie udało się zapisać do arkusza: {e}")
+    else:
+        st.caption("Współrzędne zapiszą się dopiero po kliknięciu przycisku.")
+
 
 # Mapa
 st.markdown("### Mapa")
