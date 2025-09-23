@@ -7,6 +7,8 @@ import folium
 from folium.plugins import MarkerCluster
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
+from streamlit_folium import st_folium
+
 
 st.set_page_config(page_title="Mapa z Excela", layout="wide")
 st.title("📍 Mapa klientów z pliku Excel/CSV (online, free)")
@@ -166,7 +168,7 @@ for _, r in geo_df.iterrows():
         popup=folium.Popup(popup_html, max_width=350)
     ).add_to(cluster)
 
-st.components.v1.html(m._repr_html_(), height=700)
+st_folium(m, height=700)
 
 # ---------- Export ----------
 with st.expander("💾 Eksport"):
