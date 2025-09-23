@@ -189,12 +189,30 @@ def make_map(df: pd.DataFrame) -> folium.Map:
 
     for _, r in dd.iterrows():
         popup_html = folium.Popup(fmt_popup(r), max_width=320)
-        folium.Marker(
+        color = get_color_for_value(float(r.get("Obrót w czk", 0)), thresholds, colors)
+
+        folium.CircleMarker(
             location=(float(r["lat"]), float(r["lon"])),
+            radius=7,
+            color=color,
+            fill=True,
+            fill_color=color,
+            fill_opacity=0.9,
             popup=popup_html,
             tooltip=r.get("Nazwa odbiorcy", "")
         ).add_to(cluster)
+
     return m
+
+
+def get_color_for_value(value: float, thresholds, colors) -> str:
+    """Zwraca kolor dla wartości na podstawie progów."""
+    if pd.isna(value):
+        return "gray"
+    for thr, col in zip(thresholds, colors):
+        if value <= thr:
+            return col
+    return colors[-1]  # powyżej ostatniego progu
 
 # === UI ===
 st.title("🗺️ Mapa klientów z Google Sheets (CSV)")
@@ -203,6 +221,23 @@ with st.sidebar:
     st.subheader("Źródło danych")
     st.code(CSV_URL, language="text")
     st.caption("Aby edytować dane, modyfikuj plik Google Sheets. Aplikacja wczyta je z linku CSV.")
+    st.subheader("Kolory wg obrotu")
+    st.caption("Ustaw progi i kolory dla pinezek:")
+
+    thresholds = []
+    colors = []
+
+    for i in range(4):  # możesz zmienić liczbę progów
+        thr = st.number_input(f"Próg {i+1} (CZK)", min_value=0, value=0 if i==0 else (100000*i), step=10000, key=f"thr_{i}")
+        col = st.color_picker(f"Kolor {i+1}", value=["green", "blue", "orange", "red"][i], key=f"col_{i}")
+        thresholds.append(thr)
+        colors.append(col)
+
+    # posortuj progi i kolory razem
+    thr_sorted, col_sorted = zip(*sorted(zip(thresholds, colors), key=lambda x: x[0]))
+    thresholds = list(thr_sorted)
+    colors = list(col_sorted)
+
 
 df_orig = load_csv(CSV_URL)
 
