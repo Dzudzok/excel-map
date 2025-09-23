@@ -40,22 +40,25 @@ def build_full_address(df: pd.DataFrame) -> pd.Series:
 
 @st.cache_data(show_spinner=False)
 def load_google_csv(url: str) -> pd.DataFrame:
-    import requests
+    import requests, io
     headers = {"User-Agent": "Mozilla/5.0"}
     r = requests.get(url, timeout=30, headers=headers)
     r.raise_for_status()
-    # próba CSV
-    try:
-        return pd.read_csv(io.StringIO(r.text))
-    except Exception:
-        # awaryjnie spróbuj xlsx (gdyby ktoś kiedyś zmienił output)
-        return pd.read_excel(io.BytesIO(r.content))
+    content = r.content  # surowe bajty
 
-def to_float(x):
+    # 1) CSV z poprawnym kodowaniem (preferuj utf-8-sig – zdejmuje ewentualny BOM)
+    for enc in ("utf-8-sig", "utf-8", "cp1250", "iso-8859-2"):
+        try:
+            return pd.read_csv(io.StringIO(content.decode(enc)))
+        except Exception:
+            continue
+
+    # 2) Awaryjnie spróbuj jako Excel (gdy ktoś zmieni format publikacji)
     try:
-        return float(x)
-    except:
-        return None
+        return pd.read_excel(io.BytesIO(content))
+    except Exception as e:
+        raise RuntimeError(f"Nie udało się wczytać danych z Google Sheets: {e}")
+
 
 # ---------- UI ----------
 col1, col2 = st.columns([1,1])
