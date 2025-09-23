@@ -1,4 +1,4 @@
-import io, time, math, hashlib, requests, numpy as np
+import io, time, math, hashlib, requests
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -15,10 +15,10 @@ WORKSHEET_NAME  = st.secrets.get("WORKSHEET_NAME", "Arkusz1")
 
 st.set_page_config(page_title="Mapa klientów z Excela / Google Sheets", layout="wide")
 st.title("📍 Mapa klientów z Excela / Google Sheets (online, free)")
-st.caption("Wymagane kolumny: **Adres**, **Miasto**, **PSC**. Opcjonalne: **Nazwa odbiorcy**, **Obrót w czk**, **email**, **lat**, **lon**.")
+st.caption("Wymagane kolumny: **Adres**, **Miasto**, **PSC**. Opcjonalne: **Nazwa odbiorcy**, **Obrót w czk**, **email**.")
 
 REQ_ADDR_COLS = ["Adres", "Miasto", "PSC"]
-OPT_COLS = ["Nazwa odbiorcy", "Obrót w czk", "email", "lat", "lon", "FullAddress"]
+OPT_COLS = ["Nazwa odbiorcy", "Obrót w czk", "email", "FullAddress"]
 
 # ===================== HELPERY =====================
 def to_float_or_none(x):
@@ -57,48 +57,6 @@ def build_full_address(df: pd.DataFrame) -> pd.Series:
 # ===================== ODCZYT DANYCH =====================
 @st.cache_data(show_spinner=False, ttl=60)
 def load_google(url_csv: str, spreadsheet_id: str, worksheet_name: str) -> pd.DataFrame:
-    """Czytaj z API (świeże) – fallback na publikowany CSV. Szanuj limity (429) i blokuj próby na 2 min."""
-    # Jeśli wcześniej była blokada 429 – omiń API na chwilę
-    blocked_until = st.session_state.get("sheets_blocked_until")
-    if blocked_until and datetime.utcnow() < blocked_until:
-        st.info(
-            "Limit Google Sheets chwilowo przekroczony – używam publikowanego CSV. "
-            f"Spróbuję API po {blocked_until.strftime('%H:%M:%S')} UTC lub kliknij przycisk poniżej."
-        )
-    else:
-        # Podejście z małym backoffem (do 3 prób), tylko dla odczytu
-        try:
-            if spreadsheet_id and "gcp_service_account" in st.secrets:
-                import gspread
-                from google.oauth2.service_account import Credentials
-                from gspread.exceptions import APIError
-
-                creds = Credentials.from_service_account_info(
-                    st.secrets["gcp_service_account"],
-                    scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
-                )
-                sh = gspread.authorize(creds).open_by_key(spreadsheet_id)
-                for attempt in range(3):
-                    try:
-                        ws = sh.worksheet(worksheet_name)
-                        df = pd.DataFrame(ws.get_all_records(numericise_ignore=['all']))
-                        if not df.empty:
-                            return df
-                        break
-                    except APIError as e:
-                        msg = str(e)
-                        code = getattr(getattr(e, 'response', None), 'status_code', None)
-                        if code == 429 or ('Quota exceeded' in msg):
-                            wait = min(8, 2 ** attempt)
-                            st.warning(f"Sheets 429 (read). Ponawiam za {wait}s… [próba {attempt+1}/3]")
-                            time.sleep(wait)
-                            continue
-                        raise
-        except Exception as e:
-            st.warning(f"Odczyt API nieudany ({e}). Próbuję przez publikowany CSV…")
-            # Blokuj kolejne próby API na 2 min (mniej spamowania limitu)
-            st.session_state["sheets_blocked_until"] = datetime.utcnow() + timedelta(minutes=2)
-
     # fallback: CSV (może mieć opóźnienie)
     r = requests.get(url_csv, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
     r.raise_for_status()
@@ -110,55 +68,10 @@ def load_google(url_csv: str, spreadsheet_id: str, worksheet_name: str) -> pd.Da
             pass
     return pd.read_excel(io.BytesIO(b))
 
-
-def save_to_google_sheet(df_to_save: pd.DataFrame) -> bool:
-    if not SPREADSHEET_ID:
-        st.error("Brakuje SPREADSHEET_ID w Secrets.")
-        return False
-    try:
-        import gspread
-        from gspread_dataframe import set_with_dataframe
-        from google.oauth2.service_account import Credentials
-
-        creds = Credentials.from_service_account_info(
-            st.secrets["gcp_service_account"], scopes=["https://www.googleapis.com/auth/spreadsheets"]
-        )
-        gc = gspread.authorize(creds)
-        sh = gc.open_by_key(SPREADSHEET_ID)
-        try:
-            ws = sh.worksheet(WORKSHEET_NAME)
-        except gspread.WorksheetNotFound:
-            ws = sh.add_worksheet(title=WORKSHEET_NAME, rows="2000", cols="50")
-        from gspread.exceptions import APIError
-        for attempt in range(5):
-            try:
-                set_with_dataframe(ws, df_to_save, include_index=False, include_column_header=True)
-                return True
-            except APIError as e:
-                msg = str(e)
-                code = getattr(getattr(e, 'response', None), 'status_code', None)
-                if code == 429 or ('Quota exceeded' in msg):
-                    wait = min(32, 2 ** attempt)
-                    st.warning(f"Przekroczono limit Google Sheets (429). Ponawiam za {wait}s… [próba {attempt+1}/5]")
-                    time.sleep(wait)
-                    continue
-                raise
-        st.error("Przekroczono limit Google Sheets – nie udało się zapisać po 5 próbach.")
-        # Zablokuj dalsze próby API zapisu/odczytu na 2 minuty, by nie spamować limitu
-        st.session_state["sheets_blocked_until"] = datetime.utcnow() + timedelta(minutes=2)
-        return False
-    except Exception as e:
-        st.error(f"Nie udało się zapisać do Google Sheets: {e}")
-        return False
-
-
 # ===================== GEOKODER =====================
 @st.cache_data(show_spinner=False)
 def geocode_one(address: str):
-    """Zwraca (lat, lon) dla adresów CZ/PL albo None – z timeoutami i retry."""
-    geolocator = Nominatim(
-        user_agent="mroauto-excel-map (contact: info@mroauto.cz)", timeout=10
-    )
+    geolocator = Nominatim(user_agent="mroauto-excel-map (contact: info@mroauto.cz)", timeout=10)
     geocode = RateLimiter(
         geolocator.geocode,
         min_delay_seconds=1.1,
@@ -183,15 +96,6 @@ def geocode_one(address: str):
     return (lat, lon)
 
 
-def valid_coord(lat, lon) -> bool:
-    try:
-        lat = float(lat)
-        lon = float(lon)
-    except Exception:
-        return False
-    return (48.0 <= lat <= 55.0) and (12.0 <= lon <= 25.0)
-
-
 # ===================== UI: WYBÓR ŹRÓDŁA =====================
 left, right = st.columns([3, 2])
 with left:
@@ -205,29 +109,11 @@ with left:
 with right:
     auto_geocode = st.checkbox("📍 Auto-geokoduj brakujące/błędne", value=True)
 
-# Preferencja po geokodowaniu: zostań lokalnie (nie wymuszaj zapisu/odczytu ze Sheets)
-prefer_local_after_geocode = st.checkbox(
-    "Po geokodowaniu używaj lokalnych danych (bez natychmiastowego zapisu)",
-    value=True,
-    help="Gdy włączone: mapa użyje danych z tej sesji. Zapiszesz do Sheets kiedy zechcesz (expander na dole).",
-)
-
-
 uploaded = None
 if source == "Plik (upload)":
     uploaded = st.file_uploader("Wgraj plik (Excel/CSV)", type=["xlsx", "csv"])
 
 st.divider()
-
-# Info i przełącznik odblokowania API po 429
-if st.session_state.get("sheets_blocked_until"):
-    col_a, col_b = st.columns([3,1])
-    with col_a:
-        st.caption("⏳ Google Sheets API tymczasowo zablokowane (429). Używany jest fallback CSV.")
-    with col_b:
-        if st.button("🔄 Spróbuj API teraz"):
-            st.session_state.pop("sheets_blocked_until", None)
-            st.rerun()
 
 # ===================== WCZYTANIE DANYCH =====================
 if source == "Google Sheet":
@@ -252,101 +138,42 @@ for c in REQ_ADDR_COLS:
         st.error(f"Brakuje kolumny: {c}")
         st.stop()
 
-# Zadbaj o istnienie kolumn lat/lon/FullAddress
+# FullAddress
 if "FullAddress" not in df.columns:
     df["FullAddress"] = build_full_address(df)
 
-if "lat" not in df.columns:
-    df["lat"] = np.nan
-if "lon" not in df.columns:
-    df["lon"] = np.nan
-
-# Normalizacja lat/lon
-for col in ["lat", "lon"]:
-    df[col] = (
-        pd.to_numeric(df[col].astype(str).str.replace(",", "."), errors="coerce")
-        .astype("float64")
-    )
-
-# Wiersze wymagające geokodowania
-needs_geo_mask = (
-    df["lat"].isna()
-    | df["lon"].isna()
-    | (~df[["lat", "lon"]].apply(lambda r: valid_coord(r["lat"], r["lon"]), axis=1))
-)
-needs_geo_idx = df.index[needs_geo_mask]
-
-# ===================== PODGLĄD =====================
+# Wszystkie rekordy wymagają geokodowania
 st.subheader("Podgląd danych")
 st.dataframe(df.head(50), width="stretch")
 
-# ===================== GEOKODOWANIE =====================
-if len(needs_geo_idx) > 0:
-    st.warning(
-        f"Do uzupełnienia/błędne współrzędne: {len(needs_geo_idx)}. (OSM/Nominatim: ~1 zapytanie/s)"
-    )
-    if auto_geocode or st.button("Geokoduj teraz"):
-        addrs = df.loc[needs_geo_idx, "FullAddress"].tolist()
-        results = []
-        prog = st.progress(0.0)
-        for i, addr in enumerate(addrs, start=1):
-            results.append((addr, geocode_one(addr)))
-            prog.progress(i / len(addrs))
-            time.sleep(0.05)
+st.warning("Geokodowanie wszystkich adresów (OSM/Nominatim, ~1 zapytanie/s)")
+if auto_geocode or st.button("Geokoduj teraz"):
+    addrs = df["FullAddress"].tolist()
+    results = []
+    prog = st.progress(0.0)
+    for i, addr in enumerate(addrs, start=1):
+        results.append((addr, geocode_one(addr)))
+        prog.progress(i / len(addrs))
+        time.sleep(0.05)
 
-        mapping = {a: c for a, c in results}
+    mapping = {a: c for a, c in results}
+    df["lat"] = df["FullAddress"].map(lambda a: mapping.get(a)[0] if mapping.get(a) else None)
+    df["lon"] = df["FullAddress"].map(lambda a: mapping.get(a)[1] if mapping.get(a) else None)
 
-        def pick_lat(a):
-            c = mapping.get(a)
-            return c[0] if c else np.nan
+    df = df.dropna(subset=["lat","lon"]).copy()
+    st.session_state["geo_df"] = df.to_dict(orient="records")
+    st.success("Geokodowanie zakończone – dane gotowe do mapy.")
 
-        def pick_lon(a):
-            c = mapping.get(a)
-            return c[1] if c else np.nan
-
-        df.loc[needs_geo_idx, "lat"] = (
-            df.loc[needs_geo_idx, "FullAddress"].map(pick_lat).astype("float64")
-        )
-        df.loc[needs_geo_idx, "lon"] = (
-            df.loc[needs_geo_idx, "FullAddress"].map(pick_lon).astype("float64")
-        )
-
-        # Ostateczna walidacja – jeśli dalej błędne, zerujemy
-        # finalna walidacja
-        bad = ~df.apply(lambda r: valid_coord(r["lat"], r["lon"]), axis=1)
-        df.loc[bad, ["lat","lon"]] = np.nan
-
-        # zawsze zapisz wynik do sesji i rysuj z lokalnych danych
-        st.session_state["geocoded_done"] = True
-        st.session_state["geo_df"] = df.dropna(subset=["lat","lon"]).to_dict(orient="records")
-
-        # opcjonalnie zapisz do Sheets – tylko gdy źródłem jest Google i NIE chcemy zostawać lokalnie
-        if source == "Google Sheet" and not prefer_local_after_geocode:
-            if save_to_google_sheet(df):
-                st.success(f"Zapisano współrzędne do Google Sheets (zakładka: {WORKSHEET_NAME}).")
-                # pozwól użytkownikowi świadomie przeładować dane z arkusza
-                if st.button("🔄 Przeładuj dane z Google Sheet"):
-                    st.rerun()
-            else:
-                st.info("Uzupełniono lokalnie (zapis do Sheets nieudany). Dane i mapa działają dalej z sesji.")
-
-        # brak automatycznego st.rerun() – zostajemy na lokalnych danych
-
-
-# Dane z poprawnymi współrzędnymi do rysowania
-geo_df = df.dropna(subset=["lat", "lon"]).copy()
+# Dane z poprawnymi współrzędnymi
+geo_df = pd.DataFrame(st.session_state.get("geo_df", []))
 if geo_df.empty:
-    st.info(
-        "Brak poprawnych współrzędnych. Użyj geokodowania albo uzupełnij lat/lon w arkuszu."
-    )
+    st.info("Brak poprawnych współrzędnych – uruchom geokodowanie.")
     st.stop()
 
 # ===================== MAPA =====================
-# Środek i bounds
 m = folium.Map(location=[geo_df["lat"].mean(), geo_df["lon"].mean()], zoom_start=7)
 cluster = MarkerCluster().add_to(m)
 
-# kalkulacja bounds do dopasowania
 try:
     sw = [geo_df["lat"].min(), geo_df["lon"].min()]
     ne = [geo_df["lat"].max(), geo_df["lon"].max()]
@@ -377,24 +204,12 @@ components.html(m.get_root().render(), height=700, scrolling=False)
 
 # ===================== EKSPORT / ZAPIS =====================
 with st.expander("💾 Eksport / Zapis"):
-    c1, c2 = st.columns(2)
-    with c1:
-        st.download_button(
-            "Pobierz CSV z lat/lon (to, co rysuje mapa)",
-            data=geo_df.to_csv(index=False).encode("utf-8"),
-            file_name="geokodowane_dane.csv",
-            mime="text/csv",
-        )
-    with c2:
-        if source == "Google Sheet":
-            if st.button("📤 Zapisz cały arkusz do Google Sheets (nadpisze zakładkę)"):
-                if save_to_google_sheet(df):
-                    st.success("Zapisano do Google Sheets ✅")
-                    st.rerun()
-        else:
-            st.caption("Źródło = plik. Aby zapisać w Google, przełącz się na źródło 'Google Sheet'.")
+    st.download_button(
+        "Pobierz CSV z geokodowanymi danymi",
+        data=geo_df.to_csv(index=False).encode("utf-8"),
+        file_name="geokodowane_dane.csv",
+        mime="text/csv",
+    )
 
 # ===================== STATUS =====================
-ok_cnt = len(geo_df)
-bad_cnt = int((~df.index.isin(geo_df.index)).sum())
-st.info(f"✅ Na mapie: {ok_cnt} punktów. ❗ Bez współrzędnych (nie pokazane): {bad_cnt}.")
+st.info(f"✅ Na mapie: {len(geo_df)} punktów.")
