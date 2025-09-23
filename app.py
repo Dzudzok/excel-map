@@ -124,6 +124,8 @@ if go_btn:
     st.session_state["_use_google"] = True
     for k in ["geo_df", "map_hash", "data_hash", "geocoded_done"]:
         st.session_state.pop(k, None)
+    st.experimental_rerun()  # << DODANE
+
 
 use_google = st.session_state.get("_use_google", True)  # domyślnie czytaj z Google
 
@@ -145,11 +147,24 @@ st.subheader("Podgląd danych")
 st.dataframe(df.head(50), width="stretch")
 
 # -------------------- NORMALIZACJA --------------------
-has_coords = {"lat", "lon"} <= set(df.columns)
+# --- WYKRYWANIE I NORMALIZACJA ---
+# traktuj puste lat/lon jak brak współrzędnych
+has_coord_cols = {"lat", "lon"}.issubset(df.columns)
+
+if has_coord_cols:
+    df["lat"] = pd.to_numeric(df["lat"], errors="coerce")
+    df["lon"] = pd.to_numeric(df["lon"], errors="coerce")
+    # has_coords = czy mamy chociaż jeden wiersz z oboma współrzędnymi
+    has_coords = not df[["lat", "lon"]].dropna().empty
+else:
+    has_coords = False
+
+# standardowe sprzątanie adresu
 if "Adres" in df.columns:  df["Adres"]  = norm_col(df["Adres"])
 if "Miasto" in df.columns: df["Miasto"] = norm_col(df["Miasto"])
 if "PSC" in df.columns:    df["PSC"]    = norm_col(df["PSC"]).str.replace(" ", "")
 
+# zbuduj FullAddress tylko gdy nie mamy współrzędnych
 if not has_coords:
     missing = [c for c in REQ_ADDR_COLS if c not in df.columns]
     if missing:
@@ -159,10 +174,10 @@ if not has_coords:
         df["FullAddress"] = build_full_address(df)
     df = df[df["FullAddress"].str.len() > 0].copy()
 
-# slot na mapę
+# --- SLOT NA MAPĘ ---
 map_slot = st.empty()
 
-# -------------------- GEO_DF Z SESJI --------------------
+# --- GEO_DF Z SESJI ---
 geo_df = None
 if "geo_df" in st.session_state:
     try:
@@ -170,23 +185,24 @@ if "geo_df" in st.session_state:
     except Exception:
         geo_df = None
 
-# Jeśli wejściowe dane mają lat/lon a nie mamy jeszcze geo_df
+# jeśli wejściowe dane mają GOTOWE współrzędne, a w sesji jeszcze nic nie ma
 if has_coords and geo_df is None:
-    df["lat"] = df["lat"].apply(to_float_or_none)
-    df["lon"] = df["lon"].apply(to_float_or_none)
+    # już są numeryczne po pd.to_numeric, wystarczy odfiltrować NaN
     geo_df = df.dropna(subset=["lat", "lon"]).copy()
     st.session_state["geo_df"] = geo_df.to_dict(orient="records")
 
-# -------------------- AUTO-GEOKODOWANIE + ZAPIS --------------------
-if not has_coords and geo_df is None:
+# --- AUTO-GEOKODOWANIE + ZAPIS (gdy BRAK współrzędnych) ---
+if (not has_coords) and (geo_df is None):
     st.warning("Brak kolumn lat/lon – mogę policzyć współrzędne (OSM, ~1 zapytanie/s).")
     max_rows = 300
     if len(df) > max_rows:
         st.info(f"Adresów: {len(df)}. Dla bezpieczeństwa geokoduję pierwsze {max_rows}.")
     to_geo = df["FullAddress"].head(max_rows).tolist()
 
-    # wyzwalacz: auto lub ręcznie
+    # auto albo ręcznie przyciskiem
     trigger = auto_geocode or st.button("📍 Geokoduj adresy (OSM)", key="btn_geocode")
+    if auto_geocode and not st.session_state.get("geocoded_done", False):
+        st.info("Auto-geokodowanie uruchomione… proszę nie zamykać karty.")
 
     if trigger and not st.session_state.get("geocoded_done", False):
         results = []
@@ -202,33 +218,22 @@ if not has_coords and geo_df is None:
         df["lon"] = df["FullAddress"].map(lambda a: mapping.get(a, (None, None))[1] if mapping.get(a) else None)
         geo_df = df.dropna(subset=["lat", "lon"]).copy()
 
-        # 1) zapisz do session_state
+        # 1) sesja
         st.session_state["geo_df"] = geo_df.to_dict(orient="records")
         st.session_state["geocoded_done"] = True
-
-        # 2) spróbuj zapisać do Google Sheets (opcjonalnie)
-        saved_ok = False
-        try:
-            # scal wiersze geokodowane z oryginałem (jeśli limit < wszystkich)
-            if len(df) < len(load_google_csv(GOOGLE_SHEETS_CSV)):
-                # read full published to keep columns; w razie różnic najlepiej docelowo pisać do pliku bazowego (SPREADSHEET_ID)
-                pass
-            # zapisujemy to, co mamy (w praktyce cały df z lat/lon)
-            saved_ok = save_to_google_sheet(df)
-        except Exception:
-            saved_ok = False
-
+        # 2) zapis do Google Sheets (opcjonalnie)
+        saved_ok = save_to_google_sheet(df)
         if saved_ok:
-            st.success(f"Geokodowanie zapisane do Google Sheets (zakładka: {WORKSHEET_NAME}). Przeładowuję…")
+            st.success(f"Zapisano geokody do Google Sheets (zakładka: {WORKSHEET_NAME}). Przeładowuję…")
         else:
-            st.info("Geokodowanie gotowe lokalnie. (Zapis do Sheets nieudany lub pominięty). Przeładowuję…")
-
+            st.info("Geokodowanie gotowe lokalnie. (Zapis do Sheets nieudany/pominięty). Przeładowuję…")
         st.experimental_rerun()
 
-# Jeśli dalej nie mamy współrzędnych – stop (nie rysuj neutralnej mapy, by nie „migała”)
+# jeśli mimo wszystko nie ma współrzędnych — kończymy bez rysowania pustej mapy (żeby nie „migała”)
 if geo_df is None or geo_df.empty:
     st.info("Brak gotowych współrzędnych. Jeśli włączyłeś Auto-geokoduj, odśwież się po zakończeniu.")
     st.stop()
+
 
 # -------------------- MAPA (render tylko gdy zmieniły się dane) --------------------
 def df_hash(df_in: pd.DataFrame) -> str:
