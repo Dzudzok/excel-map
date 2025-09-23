@@ -1,10 +1,13 @@
 import io
-import re
+import time
 import pandas as pd
 import streamlit as st
 import folium
 from folium.plugins import MarkerCluster
 from streamlit_folium import st_folium
+from geopy.geocoders import Nominatim
+from geopy.extra.rate_limiter import RateLimiter
+import requests
 
 st.set_page_config(page_title="Mapa z Excela (Google Sheets)", layout="wide")
 st.title("📍 Mapa klientów z Excela / Google Sheets (online, free)")
