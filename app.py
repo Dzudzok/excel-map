@@ -73,13 +73,34 @@ def load_google_csv(url: str) -> pd.DataFrame:
 
 @st.cache_data(show_spinner=False)
 def geocode_one(address: str):
-    # dodaj kraj w razie potrzeby: address + ", Czechia"
+    """Zwraca (lat, lon) albo None. Ograniczone do CZ/PL i odrzuca wyniki poza bbox."""
     geolocator = Nominatim(user_agent="mroauto-excel-map (contact: info@mroauto.cz)")
     geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1, swallow_exceptions=True)
-    loc = geocode(address)
-    if loc:
-        return (loc.latitude, loc.longitude)
-    return None
+
+    # preferencje: język czeski/polski, tylko CZ/PL, zawęź do bbox (Czechy+Polska)
+    params = dict(
+        addressdetails=False,
+        language="cs",
+        country_codes="cz,pl",
+        viewbox=((12.0, 51.6), (24.3, 48.0)),  # (west, north) , (east, south)
+        bounded=True,
+        exactly_one=True
+    )
+    loc = geocode(address, **params)
+    if not loc:
+        # druga próba po polsku (czasem pomaga)
+        params["language"] = "pl"
+        loc = geocode(address, **params)
+    if not loc:
+        return None
+
+    lat, lon = float(loc.latitude), float(loc.longitude)
+
+    # twarda walidacja — tylko CZ/PL
+    if not (48.0 <= lat <= 55.0 and 12.0 <= lon <= 25.0):
+        return None
+    return (lat, lon)
+
 
 def save_to_google_sheet(df_to_save: pd.DataFrame):
     if not SPREADSHEET_ID:
@@ -174,6 +195,22 @@ if need_address_cols:
     st.stop()
 if "FullAddress" not in df.columns:
     df["FullAddress"] = build_full_address(df)
+def valid_coord(lat, lon):
+    try:
+        lat = float(lat); lon = float(lon)
+    except Exception:
+        return False
+    return (48.0 <= lat <= 55.0) and (12.0 <= lon <= 25.0)
+
+# zamień przecinki w istniejących lat/lon (jeśli ktoś wpisał „49,83”)
+if "lat" in df.columns: df["lat"] = df["lat"].astype(str).str.replace(",", ".")
+if "lon" in df.columns: df["lon"] = df["lon"].astype(str).str.replace(",", ".")
+df["lat"] = pd.to_numeric(df.get("lat"), errors="coerce")
+df["lon"] = pd.to_numeric(df.get("lon"), errors="coerce")
+
+# wiersze do naprawy = brak lub nieprawidłowe współrzędne (np. 34/70)
+to_fix_idx = df.index[(df["lat"].isna() | df["lon"].isna()) |
+                      (~df[["lat","lon"]].apply(lambda r: valid_coord(r["lat"], r["lon"]), axis=1))]
 
 # 4) status współrzędnych
 any_coords = has_coord_cols and not df[["lat", "lon"]].dropna().empty
@@ -224,38 +261,55 @@ if any_coords:
             st.rerun()
 
 # --- przypadek 2: nie mamy żadnych koordynat – geokoduj WSZYSTKIE ---
-if not any_coords and geo_df is None:
-    st.warning("Brak współrzędnych w arkuszu – mogę policzyć je z adresów (OSM, ~1 zapytanie/s).")
-    max_rows = 300
-    to_geo = df["FullAddress"].head(max_rows).tolist()
-    if len(df) > max_rows:
-        st.info(f"Adresów: {len(df)}. Dla bezpieczeństwa geokoduję pierwsze {max_rows}.")
+# --- GEOKODOWANIE ---
+need_any_coords = df[["lat","lon"]].dropna().shape[0] > 0
+need_fix = len(to_fix_idx) > 0
 
-    trigger_all = auto_geocode or st.button("📍 Geokoduj WSZYSTKIE (OSM)")
-    if trigger_all and not st.session_state.get("geocoded_done", False):
+if need_fix and geo_df is None:
+    info = "Brak części współrzędnych – uzupełnię brakujące i błędne." if need_any_coords \
+           else "Brak współrzędnych – policzę wszystkie."
+    st.warning(info + " (OSM/Nominatim, ~1 zapytanie/s).")
+
+    to_geo = df.loc[to_fix_idx, "FullAddress"].tolist()
+    trigger = auto_geocode or st.button("📍 Geokoduj (uzupełnij brakujące/błędne)")
+
+    if trigger and not st.session_state.get("geocoded_done", False):
         results = []
         prog = st.progress(0.0)
+        n = len(to_geo)
         for i, addr in enumerate(to_geo, start=1):
             coords = geocode_one(addr)
             results.append((addr, coords))
-            prog.progress(i/len(to_geo))
+            prog.progress(i/n)
             time.sleep(0.05)
-        mapping = {a: c for a, c in results}
-        df["lat"] = df["FullAddress"].map(lambda a: mapping.get(a, (None, None))[0] if mapping.get(a) else None)
-        df["lon"] = df["FullAddress"].map(lambda a: mapping.get(a, (None, None))[1] if mapping.get(a) else None)
-        geo_df = df.dropna(subset=["lat", "lon"]).copy()
 
+        mapping = {a: c for a, c in results}
+
+        # uzupełnij WYŁĄCZNIE wiersze z to_fix_idx
+        df.loc[to_fix_idx, "lat"] = df.loc[to_fix_idx, "FullAddress"].map(lambda a: mapping.get(a, (None, None))[0] if mapping.get(a) else None)
+        df.loc[to_fix_idx, "lon"] = df.loc[to_fix_idx, "FullAddress"].map(lambda a: mapping.get(a, (None, None))[1] if mapping.get(a) else None)
+
+        # ponowna walidacja – odfiltruj ewentualne śmieci, których nie udało się poprawić
+        df.loc[~df.apply(lambda r: valid_coord(r["lat"], r["lon"]), axis=1), ["lat","lon"]] = pd.NA
+
+        geo_df = df.dropna(subset=["lat","lon"]).copy()
         st.session_state["geo_df"] = geo_df.to_dict(orient="records")
         st.session_state["geocoded_done"] = True
 
+        # zapis do Sheets (nadpisuje zakładkę)
         saved_ok = save_to_google_sheet(df)
-        st.success("Zapisano geokody do Google Sheets." if saved_ok else "Geokody lokalnie – zapis do Sheets nieudany.")
+        if saved_ok:
+            st.success(f"Zapisano poprawione współrzędne do Google Sheets (zakładka: {WORKSHEET_NAME}).")
+        else:
+            st.info("Uzupełniono lokalnie (zapis do Sheets nieudany).")
         st.rerun()
 
-# jeśli dalej brak współrzędnych – kończymy bez rysowania mapy (żeby nie migała)
-if geo_df is None or geo_df.empty:
-    st.info("Brak gotowych współrzędnych. Użyj geokodowania albo uzupełnij lat/lon w arkuszu.")
+# jeśli po powyższym nadal nie ma poprawnych współrzędnych:
+geo_df = df.dropna(subset=["lat","lon"]).copy()
+if geo_df.empty:
+    st.info("Brak poprawnych współrzędnych po walidacji. Sprawdź adresy/kody pocztowe i spróbuj ponownie.")
     st.stop()
+
 
 
 # -------------------- MAPA (stabilny render przez HTML) --------------------
