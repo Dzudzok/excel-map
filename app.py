@@ -263,7 +263,7 @@ if len(needs_geo_idx) > 0:
                 )
             else:
                 st.info("Uzupełniono lokalnie (zapis do Sheets nieudany).")
-        st.experimental_rerun()
+        st.rerun()
 
 # Dane z poprawnymi współrzędnymi do rysowania
 geo_df = df.dropna(subset=["lat", "lon"]).copy()
@@ -322,7 +322,7 @@ with st.expander("💾 Eksport / Zapis"):
             if st.button("📤 Zapisz cały arkusz do Google Sheets (nadpisze zakładkę)"):
                 if save_to_google_sheet(df):
                     st.success("Zapisano do Google Sheets ✅")
-                    st.experimental_rerun()
+                    st.rerun()
         else:
             st.caption("Źródło = plik. Aby zapisać w Google, przełącz się na źródło 'Google Sheet'.")
 
