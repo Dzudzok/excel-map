@@ -11,6 +11,21 @@ from folium.plugins import MarkerCluster
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
 
+import re
+
+def parse_czk(x) -> float:
+    s = str(x).strip()
+    if not s or s.lower() in ("nan", "none"):
+        return float("nan")
+    s = s.replace("\xa0", " ")      # twarde spacje
+    s = s.replace(" ", "")          # usuń separatory tysięcy
+    s = s.replace(",", ".")         # CZ/PL przecinek => kropka
+    s = re.sub(r"[^0-9.\-]", "", s) # wywal znaki walut itp.
+    try:
+        return float(s)
+    except:
+        return float("nan")
+
 # === USTAWIENIA ===
 st.set_page_config(page_title="Mapa klientów z Excela / Google Sheets", layout="wide")
 if "saved_latlon_keys" not in st.session_state:
@@ -160,37 +175,33 @@ def write_back_latlon(original: pd.DataFrame, updated: pd.DataFrame) -> int:
 
     return updated_rows
 
-def make_map(df: pd.DataFrame) -> folium.Map:
-    # Filtrowanie tylko z kompletem współrzędnych
+def make_map(df: pd.DataFrame, thresholds, colors) -> folium.Map:
     dd = df.dropna(subset=["lat", "lon"]).copy()
 
     if dd.empty:
-        center = (49.820, 15.470)  # środek CZ
-        m = folium.Map(location=center, zoom_start=7, control_scale=True)
-        return m
+        center = (49.820, 15.470)
+        return folium.Map(location=center, zoom_start=7, control_scale=True)
 
-    # Środek mapy
     center = (dd["lat"].mean(), dd["lon"].mean())
     m = folium.Map(location=center, zoom_start=7, control_scale=True)
-
     cluster = MarkerCluster().add_to(m)
 
     def fmt_popup(r: pd.Series) -> str:
         lines = []
         lines.append(f"<b>{r.get('Nazwa odbiorcy','').strip()}</b>")
-        obr = str(r.get("Obrót w czk", "")).strip()
-        if obr:
-            lines.append(f"Obrót: {obr} CZK")
+        obr_txt = str(r.get("Obrót w czk", "")).strip()
+        if obr_txt:
+            lines.append(f"Obrót: {obr_txt} CZK")
         email = str(r.get("email", "")).strip()
         if email:
             lines.append(f"Email: {email}")
-        addr = build_full_address(r)
-        lines.append(addr)
+        lines.append(build_full_address(r))
         return "<br>".join(lines)
 
     for _, r in dd.iterrows():
+        val = r.get("obr_czk", float("nan"))
+        color = get_color_for_value(val, thresholds, colors)
         popup_html = folium.Popup(fmt_popup(r), max_width=320)
-        color = get_color_for_value(float(r.get("Obrót w czk", 0)), thresholds, colors)
 
         folium.CircleMarker(
             location=(float(r["lat"]), float(r["lon"])),
@@ -206,14 +217,15 @@ def make_map(df: pd.DataFrame) -> folium.Map:
     return m
 
 
+
 def get_color_for_value(value: float, thresholds, colors) -> str:
-    """Zwraca kolor dla wartości na podstawie progów."""
     if pd.isna(value):
-        return "gray"
+        return "#cccccc"
     for thr, col in zip(thresholds, colors):
         if value <= thr:
             return col
-    return colors[-1]  # powyżej ostatniego progu
+    return colors[-1] if colors else "#1155d7"
+
 
 # === UI ===
 st.title("🗺️ Mapa klientów z Google Sheets (CSV)")
@@ -230,7 +242,7 @@ with st.sidebar:
 
     for i in range(4):  # możesz zmienić liczbę progów
         thr = st.number_input(f"Próg {i+1} (CZK)", min_value=0, value=0 if i==0 else (100000*i), step=10000, key=f"thr_{i}")
-        col = st.color_picker(f"Kolor {i+1}", value=["#ffffff", "#00FFAA", "#fdfdfd", "#ededed"][i], key=f"col_{i}")
+        col = st.color_picker(f"Kolor {i+1}", value=["#ff334a", "#0e630e", "#ff4500", "#d2c768"][i], key=f"col_{i}")
         thresholds.append(thr)
         colors.append(col)
 
@@ -241,6 +253,7 @@ with st.sidebar:
 
 
 df_orig = load_csv(CSV_URL)
+df_orig["obr_czk"] = df_orig["Obrót w czk"].apply(parse_czk)
 
 st.markdown("#### Podgląd danych (pierwsze 20 wierszy)")
 st.dataframe(df_orig.head(20), use_container_width=True)
@@ -273,7 +286,7 @@ FAST_RENDER = st.toggle("🚀 Tryb szybki (bez odświeżania przy ruchu mapy)", 
 
 # Mapa
 st.markdown("### Mapa")
-m = make_map(df_geo)
+m = make_map(df_geo, thresholds, colors)
 if FAST_RENDER:
     # Statyczny HTML — zero rerunów przy pan/zoom
     components.html(m.get_root().render(), height=700, scrolling=False)
