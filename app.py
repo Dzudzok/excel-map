@@ -1,6 +1,8 @@
 import io
 import time
+import math
 import pandas as pd
+import numpy as np
 import streamlit as st
 import folium
 from folium.plugins import MarkerCluster
@@ -8,33 +10,28 @@ from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
 import requests
-import math
-import numpy as np
 
-st.set_page_config(page_title="Mapa z Excela (Google Sheets)", layout="wide")
+# === (OPCJONALNIE) ZAPIS DO GOOGLE SHEETS ===
+# Podaj prawdziwe ID arkusza (z URL w formie .../spreadsheets/d/<ID>/edit)
+SPREADSHEET_ID = st.secrets.get("SPREADSHEET_ID", "")        # <- wpisz w Secrets
+WORKSHEET_NAME = st.secrets.get("WORKSHEET_NAME", "Arkusz1")  # <- wpisz w Secrets
+
+st.set_page_config(page_title="Mapa z Excela / Google Sheets", layout="wide")
 st.title("📍 Mapa klientów z Excela / Google Sheets (online, free)")
 
-# === STAŁY PUBLICZNY CSV Z GOOGLE SHEETS ===
+# === STAŁY PUBLICZNY CSV Z GOOGLE SHEETS (PUBLISH TO WEB) ===
 GOOGLE_SHEETS_CSV = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSijSBg7JqZkg4T8aY56FEhox0pqw5huE7oWRmSbaB25LJj9nFyo76JLPKSXHZecd4nZEyu92jesaor/pub?gid=0&single=true&output=csv"
 
-st.markdown(
-"""
-Wymagane kolumny: **Adres**, **Miasto**, **PSC**.  
-Opcjonalne: **Nazwa odbiorcy**, **Obrót w czk**, **email**.  
-Jeśli podasz **lat** i **lon** w danych, geokodowanie jest pomijane.
-"""
-)
+st.caption("Wymagane kolumny: **Adres**, **Miasto**, **PSC**. Opcjonalne: **Nazwa odbiorcy**, **Obrót w czk**, **email**, **lat**, **lon**.")
 
-# ---------- Helpers ----------
 REQ_ADDR_COLS = ["Adres", "Miasto", "PSC"]
 
+# ---------- Helpers ----------
 def to_float_or_none(x):
-    """Zamień '123 456,78' / '123,45' / '123.45' -> float; dla śmieci zwróć None."""
     try:
         if x is None or (isinstance(x, float) and math.isnan(x)):
             return None
         s = str(x).strip().replace("\xa0", " ").replace(" ", "")
-        # zamień przecinek na kropkę (format EU -> kropka)
         s = s.replace(",", ".")
         return float(s)
     except Exception:
@@ -44,11 +41,10 @@ def fmt_czk(x):
     v = to_float_or_none(x)
     if v is None:
         return ""
-    # format z dwoma miejscami; zamień separator tysięcy na spację, a kropkę na przecinek
-    txt = f"{v:,.2f}"          # np. '123,456.78'
-    txt = txt.replace(",", " ").replace(".", ",")  # -> '123 456,78'
+    txt = f"{v:,.2f}"          # '123,456.78'
+    txt = txt.replace(",", " ").replace(".", ",")  # '123 456,78'
     return f"Obrót: {txt} CZK"
-    
+
 def norm_col(s: pd.Series) -> pd.Series:
     return (
         s.fillna("")
@@ -66,194 +62,154 @@ def build_full_address(df: pd.DataFrame) -> pd.Series:
 
 @st.cache_data(show_spinner=False)
 def load_google_csv(url: str) -> pd.DataFrame:
-    import requests, io
     headers = {"User-Agent": "Mozilla/5.0"}
     r = requests.get(url, timeout=30, headers=headers)
     r.raise_for_status()
-    content = r.content  # surowe bajty
-
-    # 1) CSV z poprawnym kodowaniem (preferuj utf-8-sig – zdejmuje ewentualny BOM)
+    content = r.content  # bajty
     for enc in ("utf-8-sig", "utf-8", "cp1250", "iso-8859-2"):
         try:
             return pd.read_csv(io.StringIO(content.decode(enc)))
         except Exception:
             continue
-
-    # 2) Awaryjnie spróbuj jako Excel (gdy ktoś zmieni format publikacji)
-    try:
-        return pd.read_excel(io.BytesIO(content))
-    except Exception as e:
-        raise RuntimeError(f"Nie udało się wczytać danych z Google Sheets: {e}")
+    return pd.read_excel(io.BytesIO(content))
 
 @st.cache_data(show_spinner=False)
-def geocode_many(addresses: list[str]) -> dict[str, tuple[float, float] | None]:
-    """Zwraca słownik: adres -> (lat, lon) lub None. Cache’uje wyniki."""
+def geocode_one(address: str):
     geolocator = Nominatim(user_agent="mroauto-excel-map (contact: info@mroauto.cz)")
     geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1, swallow_exceptions=True)
-    results = {}
-    progress = st.progress(0)
-    n = len(addresses)
-    for i, addr in enumerate(addresses, start=1):
-        loc = geocode(addr)
-        if loc:
-            results[addr] = (loc.latitude, loc.longitude)
-        else:
-            results[addr] = None
-        progress.progress(i / n)
-    return results
+    loc = geocode(address)
+    if loc:
+        return (loc.latitude, loc.longitude)
+    return None
+
+# ---------- (OPCJONALNIE) ZAPIS DO SHEETS ----------
+def save_to_google_sheet(df_to_save: pd.DataFrame):
+    if not SPREADSHEET_ID:
+        st.error("Brakuje SPREADSHEET_ID w Secrets — nie mogę zapisać do Google Sheets.")
+        return False
+    try:
+        import gspread
+        from gspread_dataframe import set_with_dataframe
+        from google.oauth2.service_account import Credentials
+        scopes = ["https://www.googleapis.com/auth/spreadsheets"]
+        creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scopes)
+        gc = gspread.authorize(creds)
+        sh = gc.open_by_key(SPREADSHEET_ID)
+        try:
+            ws = sh.worksheet(WORKSHEET_NAME)
+        except gspread.WorksheetNotFound:
+            ws = sh.add_worksheet(title=WORKSHEET_NAME, rows="1000", cols="26")
+        set_with_dataframe(ws, df_to_save, include_index=False, include_column_header=True)
+        return True
+    except Exception as e:
+        st.error(f"Nie udało się zapisać do Google Sheets: {e}")
+        return False
 
 # ---------- UI ----------
-col1, col2 = st.columns([1,1])
-
-with col1:
-    uploaded = st.file_uploader("Wgraj własny plik (Excel/CSV)", type=["xlsx", "csv"])
-
-with col2:
+c1, c2 = st.columns([1,1])
+with c1:
+    uploaded = st.file_uploader("Wgraj plik (Excel/CSV)", type=["xlsx", "csv"])
+with c2:
     if st.button("⬇️ Pobierz z Google (stały link)"):
         st.session_state["_use_google"] = True
+        # nowy import danych -> wyczyść poprzednie geo
+        st.session_state.pop("geo_df", None)
 
 use_google = st.session_state.get("_use_google", False)
 
 # ---------- Load data ----------
 df = None
-
 if uploaded is not None and not use_google:
     if uploaded.name.lower().endswith(".csv"):
         df = pd.read_csv(uploaded)
     else:
         df = pd.read_excel(uploaded)
 elif use_google:
-    try:
-        df = load_google_csv(GOOGLE_SHEETS_CSV)
-    except Exception as e:
-        st.error(f"Nie udało się pobrać danych z Google Sheets: {e}")
-        st.stop()
+    df = load_google_csv(GOOGLE_SHEETS_CSV)
 
-if df is None:
+if df is None or df.empty:
     st.info("Wgraj plik lub kliknij „Pobierz z Google (stały link)”.")
     st.stop()
 
-if df.empty:
-    st.error("Plik nie zawiera danych.")
-    st.stop()
-
+# Podgląd
 st.subheader("Podgląd danych")
 st.dataframe(df.head(50), width="stretch")
 
-
-# ---------- Column checks / normalize ----------
-has_coords = {"lat","lon"} <= set(df.columns)
-
-if not has_coords:
-    missing = [c for c in REQ_ADDR_COLS if c not in df.columns]
-    if missing:
-        st.error(f"Brakuje wymaganych kolumn adresowych: {', '.join(missing)} "
-                 f"(albo dodaj lat/lon, wtedy adres nie jest potrzebny).")
-        st.stop()
-
-# sprzątanie kolumn
+# Normalizacja i sprawdzenie kolumn
+has_coords = {"lat", "lon"} <= set(df.columns)
 if "Adres" in df.columns:  df["Adres"]  = norm_col(df["Adres"])
 if "Miasto" in df.columns: df["Miasto"] = norm_col(df["Miasto"])
 if "PSC" in df.columns:    df["PSC"]    = norm_col(df["PSC"]).str.replace(" ", "")
 
-# FullAddress jeśli nie ma lat/lon
 if not has_coords:
+    missing = [c for c in REQ_ADDR_COLS if c not in df.columns]
+    if missing:
+        st.error(f"Brakuje kolumn: {', '.join(missing)} (lub dodaj lat/lon).")
+        st.stop()
     df["FullAddress"] = build_full_address(df)
     df = df[df["FullAddress"].str.len() > 0].copy()
 
-# ---------- Geocoding / coordinates ----------
-with st.spinner("Przygotowuję współrzędne… (jeśli brak lat/lon, geokodowanie może potrwać)"):
-    if has_coords:
-        df["lat"] = df["lat"].apply(to_float)
-        df["lon"] = df["lon"].apply(to_float)
-        geo_df = df.dropna(subset=["lat","lon"]).copy()
-        skipped = len(df) - len(geo_df)
-    else:
-        st.warning("Brak kolumn lat/lon — mogę policzyć współrzędne z adresów (wolne, darmowe geokodowanie OSM).")
-        # przygotuj adresy (jeśli masz kolumnę 'Kraj', możesz dodać ją do adresu)
-        df["FullAddress"] = build_full_address(df)
-        df = df[df["FullAddress"].str.len() > 0].copy()
-    
-        # ogranicz jednorazową liczbę do, np., 300 rekordów (żeby nie zajechać OSM)
-        max_rows = 300
-        if len(df) > max_rows:
-            st.info(f"Masz {len(df)} wierszy. Dla bezpieczeństwa geokoduję pierwsze {max_rows}. "
-                    f"Możesz dodać lat/lon do pliku, by pominąć limit.")
-        to_geo = df["FullAddress"].head(max_rows).tolist()
-    
-        if st.button("📍 Geokoduj adresy (OSM)"):
-            with st.spinner("Geokoduję przez OpenStreetMap/Nominatim… (ok. 1 adres/sek)"):
-                geo = geocode_many(to_geo)
-    
-            df["lat"] = df["FullAddress"].map(lambda a: geo.get(a, (None, None))[0] if geo.get(a) else None)
-            df["lon"] = df["FullAddress"].map(lambda a: geo.get(a, (None, None))[1] if geo.get(a) else None)
-    
-            got = df[["lat","lon"]].dropna().shape[0]
-            st.success(f"Gotowe. Znaleziono współrzędne dla {got} z {len(to_geo)} adresów.")
-    
-            geo_df = df.dropna(subset=["lat","lon"]).copy()
-            if geo_df.empty:
-                st.error("Nie udało się uzyskać żadnych współrzędnych — sprawdź, czy adresy są kompletne (ulica, miasto, kod).")
-                st.stop()
-    
-            # rysuj mapę (Twój dotychczasowy kod od rysowania, np. folium + st_folium)
-            m = folium.Map(location=[geo_df["lat"].mean(), geo_df["lon"].mean()], zoom_start=8)
-            cluster = MarkerCluster().add_to(m)
-    
-            def val(col, row, default=""):
-                return row[col] if col in geo_df.columns and pd.notna(row[col]) else default
-    
-            for _, r in geo_df.iterrows():
-                popup_html = f"""
-                <div style="font-size:14px">
-                  <b>{val('Nazwa odbiorcy', r)}</b><br>
-                  {('Obrót: {:,.2f} CZK'.format(val('Obrót w czk', r)) if pd.notna(val('Obrót w czk', r)) else '')}<br>
-                  {('Email: ' + val('email', r)) if val('email', r) else ''}<br>
-                  Adres: {r['FullAddress']}
-                </div>
-                """
-                folium.Marker([r["lat"], r["lon"]], tooltip=val('Nazwa odbiorcy', r) or "Klient",
-                              popup=folium.Popup(popup_html, max_width=350)).add_to(cluster)
-    
-            st_folium(m, height=700)
-    
-            with st.expander("💾 Eksport"):
-                st.download_button(
-                    "Pobierz CSV z geokodowanymi współrzędnymi",
-                    data=df.to_csv(index=False).encode("utf-8"),
-                    file_name="geokodowane_dane.csv",
-                    mime="text/csv"
-                )
-            st.stop()
+# Przygotuj placeholder pod mapę
+map_slot = st.empty()
 
-    # Jeżeli użytkownik nie kliknął przycisku — pokaż neutralną mapę
-    m = folium.Map(location=[49.8, 18.2], zoom_start=7)
-    st_folium(m, height=500)
+# Odczytaj wynik geokodowania z sesji (jeśli już był)
+geo_df = None
+if "geo_df" in st.session_state:
+    try:
+        geo_df = pd.DataFrame(st.session_state["geo_df"])
+    except Exception:
+        geo_df = None
+
+# Jeśli mamy lat/lon w danych wejściowych – użyj ich
+if has_coords and geo_df is None:
+    df["lat"] = df["lat"].apply(to_float_or_none)
+    df["lon"] = df["lon"].apply(to_float_or_none)
+    geo_df = df.dropna(subset=["lat", "lon"]).copy()
+    st.session_state["geo_df"] = geo_df.to_dict(orient="records")
+
+# Sekcja geokodowania (gdy nie było lat/lon)
+if not has_coords and geo_df is None:
+    st.warning("Brak kolumn lat/lon — mogę policzyć współrzędne (OSM/Nominatim, ok. 1 zapytanie/s).")
+    max_rows = 300
+    if len(df) > max_rows:
+        st.info(f"Adresów: {len(df)}. Dla bezpieczeństwa geokoduję pierwsze {max_rows}.")
+    to_geo = df["FullAddress"].head(max_rows).tolist()
+
+    if st.button("📍 Geokoduj adresy (OSM)", key="btn_geocode"):
+        results = []
+        prog = st.progress(0.0)
+        for i, addr in enumerate(to_geo, start=1):
+            coords = geocode_one(addr)
+            results.append((addr, coords))
+            prog.progress(i/len(to_geo))
+            time.sleep(0.05)  # delikatny bufor, RateLimiter i tak trzyma 1s
+
+        mapping = {a: c for a, c in results}
+        df["lat"] = df["FullAddress"].map(lambda a: mapping.get(a, (None, None))[0] if mapping.get(a) else None)
+        df["lon"] = df["FullAddress"].map(lambda a: mapping.get(a, (None, None))[1] if mapping.get(a) else None)
+        geo_df = df.dropna(subset=["lat", "lon"]).copy()
+
+        st.session_state["geo_df"] = geo_df.to_dict(orient="records")
+        st.success(f"Znaleziono współrzędne dla {geo_df.shape[0]} / {len(to_geo)} adresów.")
+        st.rerun()
+
+# Jeśli dalej nie mamy współrzędnych – pokaż neutralną mapę i instrukcję
+if geo_df is None or geo_df.empty:
+    with map_slot:
+        m = folium.Map(location=[49.8, 18.2], zoom_start=7)
+        st_folium(m, height=550)
+    st.info("Dodaj kolumny 'lat' i 'lon' do danych lub kliknij 'Geokoduj adresy (OSM)'.")
     st.stop()
 
-if geo_df.empty:
-    st.error("Brak wierszy z poprawnymi danymi.")
-    st.stop()
-
-# Jeśli nie mamy żadnych współrzędnych, to narysujemy mapę na bazowym centrum
-if pd.isna(geo_df["lat"]).all() or pd.isna(geo_df["lon"]).all():
-    # środek na Czechy/Śląsk jako domyślna perspektywa
-    m = folium.Map(location=[49.8, 18.2], zoom_start=7)
-    st_folium(m, height=650)
-    st.info("Dodaj kolumny 'lat' i 'lon' do danych, żeby zobaczyć pinezki. "
-            "Jeśli wolisz, mogę włączyć darmowe geokodowanie OSM (wolne, ale bez klucza).")
-    st.stop()
-
-st.success(f"Pinezek z koordynatami: {geo_df[['lat','lon']].dropna().shape[0]}. Pominętych: {skipped}.")
-
-# ---------- Map ----------
-m = folium.Map(location=[geo_df['lat'].dropna().mean(), geo_df['lon'].dropna().mean()], zoom_start=8)
+# ---------- MAPA ----------
+m = folium.Map(location=[geo_df["lat"].mean(), geo_df["lon"].mean()], zoom_start=8)
 cluster = MarkerCluster().add_to(m)
 
 def val(col, row, default=""):
     return row[col] if col in geo_df.columns and pd.notna(row[col]) else default
 
-for _, r in geo_df.dropna(subset=["lat","lon"]).iterrows():
+for _, r in geo_df.iterrows():
+    amount_text = fmt_czk(val('Obrót w czk', r))
     popup_html = f"""
     <div style="font-size:14px">
       <b>{val('Nazwa odbiorcy', r)}</b><br>
@@ -268,20 +224,20 @@ for _, r in geo_df.dropna(subset=["lat","lon"]).iterrows():
         popup=folium.Popup(popup_html, max_width=350)
     ).add_to(cluster)
 
-st_folium(m, height=700)
+with map_slot:
+    st_folium(m, height=700)
 
-# ---------- Export ----------
-with st.expander("💾 Eksport"):
+# ---------- EKSPORT + ZAPIS ----------
+with st.expander("💾 Eksport / Zapis"):
     st.download_button(
-        "Pobierz CSV z danymi (w tym lat/lon jeśli były w źródle)",
+        "Pobierz CSV z lat/lon",
         data=geo_df.to_csv(index=False).encode("utf-8"),
-        file_name="dane_z_koordynatami.csv",
+        file_name="geokodowane_dane.csv",
         mime="text/csv"
     )
-    html = m.get_root().render()
-    st.download_button(
-        "Pobierz mapę jako plik HTML",
-        data=html.encode("utf-8"),
-        file_name="mapa.html",
-        mime="text/html"
-    )
+
+    # Zapis do Google Sheets (nadpisze wskazaną zakładkę)
+    if st.button("📤 Zapisz do Google Sheets (nadpisz zakładkę)"):
+        ok = save_to_google_sheet(geo_df)
+        if ok:
+            st.success("Zapisano do Google Sheets ✅")
