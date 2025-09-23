@@ -59,8 +59,8 @@ def row_key(row: pd.Series) -> str:
     return hashlib.sha1(base.encode("utf-8")).hexdigest()
 
         # Pomijaj rekordy, które w tej sesji już zapisaliśmy:
-        if row_key(out.loc[idx]) in st.session_state["saved_latlon_keys"]:
-            continue
+     if row_key(out.loc[idx]) in st.session_state["saved_latlon_keys"]:
+        continue
 
 @st.cache_data(show_spinner=False)
 def geocode_one(address: str) -> Optional[Tuple[float, float]]:
