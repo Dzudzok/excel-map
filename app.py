@@ -205,6 +205,14 @@ with left:
 with right:
     auto_geocode = st.checkbox("📍 Auto-geokoduj brakujące/błędne", value=True)
 
+# Preferencja po geokodowaniu: zostań lokalnie (nie wymuszaj zapisu/odczytu ze Sheets)
+prefer_local_after_geocode = st.checkbox(
+    "Po geokodowaniu używaj lokalnych danych (bez natychmiastowego zapisu)",
+    value=True,
+    help="Gdy włączone: mapa użyje danych z tej sesji. Zapiszesz do Sheets kiedy zechcesz (expander na dole).",
+)
+
+
 uploaded = None
 if source == "Plik (upload)":
     uploaded = st.file_uploader("Wgraj plik (Excel/CSV)", type=["xlsx", "csv"])
@@ -304,18 +312,26 @@ if len(needs_geo_idx) > 0:
         )
 
         # Ostateczna walidacja – jeśli dalej błędne, zerujemy
-        bad_mask = ~df.apply(lambda r: valid_coord(r["lat"], r["lon"]), axis=1)
-        df.loc[bad_mask, ["lat", "lon"]] = np.nan
+        # finalna walidacja
+        bad = ~df.apply(lambda r: valid_coord(r["lat"], r["lon"]), axis=1)
+        df.loc[bad, ["lat","lon"]] = np.nan
 
-        # Zapis do Google (jeśli źródło to Google Sheet)
-        if source == "Google Sheet":
+        # zawsze zapisz wynik do sesji i rysuj z lokalnych danych
+        st.session_state["geocoded_done"] = True
+        st.session_state["geo_df"] = df.dropna(subset=["lat","lon"]).to_dict(orient="records")
+
+        # opcjonalnie zapisz do Sheets – tylko gdy źródłem jest Google i NIE chcemy zostawać lokalnie
+        if source == "Google Sheet" and not prefer_local_after_geocode:
             if save_to_google_sheet(df):
-                st.success(
-                    f"Zapisano uzupełnione współrzędne do Google Sheets (zakładka: {WORKSHEET_NAME})."
-                )
+                st.success(f"Zapisano współrzędne do Google Sheets (zakładka: {WORKSHEET_NAME}).")
+                # pozwól użytkownikowi świadomie przeładować dane z arkusza
+                if st.button("🔄 Przeładuj dane z Google Sheet"):
+                    st.rerun()
             else:
-                st.info("Uzupełniono lokalnie (zapis do Sheets nieudany).")
-        st.rerun()
+                st.info("Uzupełniono lokalnie (zapis do Sheets nieudany). Dane i mapa działają dalej z sesji.")
+
+        # brak automatycznego st.rerun() – zostajemy na lokalnych danych
+
 
 # Dane z poprawnymi współrzędnymi do rysowania
 geo_df = df.dropna(subset=["lat", "lon"]).copy()
