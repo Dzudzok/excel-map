@@ -127,15 +127,7 @@ if go_btn:
         st.session_state.pop(k, None)
     st.rerun()   # zamiast st.experimental_rerun()
 
-# ... po geokodowaniu i próbie zapisu:
-saved_ok = save_to_google_sheet(df)  # tu zapisujesz cały df albo geo_df – jak masz w kodzie
 
-if saved_ok:
-    st.success(f"Zapisano geokody do Google Sheets (zakładka: {WORKSHEET_NAME}). Przeładowuję…")
-else:
-    st.info("Geokodowanie gotowe lokalnie. (Zapis do Sheets nieudany/pominięty). Przeładowuję…")
-
-st.rerun()
 
 
 
@@ -239,7 +231,9 @@ if (not has_coords) and (geo_df is None):
             st.success(f"Zapisano geokody do Google Sheets (zakładka: {WORKSHEET_NAME}). Przeładowuję…")
         else:
             st.info("Geokodowanie gotowe lokalnie. (Zapis do Sheets nieudany/pominięty). Przeładowuję…")
-        st.experimental_rerun()
+
+        st.rerun()   # <-- poprawna wersja
+
 
 # jeśli mimo wszystko nie ma współrzędnych — kończymy bez rysowania pustej mapy (żeby nie „migała”)
 if geo_df is None or geo_df.empty:
@@ -290,3 +284,4 @@ with st.expander("💾 Eksport / Zapis"):
         ok = save_to_google_sheet(geo_df)
         if ok:
             st.success("Zapisano do Google Sheets ✅")
+            st.rerun()   # (opcjonalnie) odśwież po ręcznym zapisie
