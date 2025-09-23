@@ -1,4 +1,4 @@
-import io, time, math, hashlib, requests
+import io, time, math, hashlib, requests, numpy as np
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
@@ -43,28 +43,35 @@ def build_full_address(df: pd.DataFrame) -> pd.Series:
     p = norm_col(df["PSC"]).str.replace(" ","")
     return (a + ", " + m + " " + p).str.strip(", ").str.strip()
 
-@st.cache_data(show_spinner=False, ttl=60)
-def load_google_csv(url: str) -> pd.DataFrame:
-    r = requests.get(url, timeout=30, headers={"User-Agent":"Mozilla/5.0"}); r.raise_for_status()
+# ----------- ODCZYT: preferuj API (świeże), fallback: published CSV -----------
+@st.cache_data(show_spinner=False, ttl=10)
+def load_google(url_csv: str, spreadsheet_id: str, worksheet_name: str) -> pd.DataFrame:
+    try:
+        if spreadsheet_id and "gcp_service_account" in st.secrets:
+            import gspread
+            from google.oauth2.service_account import Credentials
+            creds = Credentials.from_service_account_info(
+                st.secrets["gcp_service_account"],
+                scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"]
+            )
+            sh = gspread.authorize(creds).open_by_key(spreadsheet_id)
+            ws = sh.worksheet(worksheet_name)
+            df = pd.DataFrame(ws.get_all_records(numericise_ignore=['all']))
+            if not df.empty:
+                return df
+    except Exception as e:
+        st.warning(f"Odczyt API nieudany ({e}). Próbuję przez publikowany CSV…")
+
+    # fallback: CSV (może mieć opóźnienie)
+    r = requests.get(url_csv, timeout=30, headers={"User-Agent":"Mozilla/5.0"})
+    r.raise_for_status()
     b = r.content
     for enc in ("utf-8-sig","utf-8","cp1250","iso-8859-2"):
         try: return pd.read_csv(io.StringIO(b.decode(enc)))
         except Exception: pass
     return pd.read_excel(io.BytesIO(b))
 
-@st.cache_data(show_spinner=False)
-def geocode_one(address: str):
-    """Zwraca (lat,lon) w CZ/PL albo None."""
-    geolocator = Nominatim(user_agent="mroauto-excel-map (contact: info@mroauto.cz)")
-    geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1, swallow_exceptions=True)
-    params = dict(addressdetails=False, language="cs", country_codes="cz,pl",
-                  viewbox=((12.0, 51.6), (24.3, 48.0)), bounded=True, exactly_one=True)
-    loc = geocode(address, **params) or geocode(address, **{**params, "language":"pl"})
-    if not loc: return None
-    lat, lon = float(loc.latitude), float(loc.longitude)
-    if not (48.0 <= lat <= 55.0 and 12.0 <= lon <= 25.0): return None
-    return (lat, lon)
-
+# ----------- ZAPIS: API do tej samej zakładki -----------
 def save_to_google_sheet(df_to_save: pd.DataFrame):
     if not SPREADSHEET_ID:
         st.error("Brakuje SPREADSHEET_ID w Secrets."); return False
@@ -86,6 +93,28 @@ def save_to_google_sheet(df_to_save: pd.DataFrame):
     except Exception as e:
         st.error(f"Nie udało się zapisać do Google Sheets: {e}")
         return False
+
+# ----------- Geokoder: timeout + retry + CZ/PL -----------
+@st.cache_data(show_spinner=False)
+def geocode_one(address: str):
+    """(lat, lon) w CZ/PL albo None – solidne timeouty i retry."""
+    geolocator = Nominatim(user_agent="mroauto-excel-map (contact: info@mroauto.cz)", timeout=10)
+    geocode = RateLimiter(
+        geolocator.geocode,
+        min_delay_seconds=1.1,
+        error_wait_seconds=3.0,
+        max_retries=2,
+        swallow_exceptions=True,
+    )
+    params = dict(
+        addressdetails=False, language="cs", country_codes="cz,pl",
+        viewbox=((12.0, 51.6), (24.3, 48.0)), bounded=True, exactly_one=True
+    )
+    loc = geocode(address, **params) or geocode(address, **{**params, "language":"pl"})
+    if not loc: return None
+    lat, lon = float(loc.latitude), float(loc.longitude)
+    if not (48.0 <= lat <= 55.0 and 12.0 <= lon <= 25.0): return None
+    return (lat, lon)
 
 # -------------------- UI --------------------
 c1, c2, c3, c4 = st.columns([1,1,1,1])
@@ -113,7 +142,7 @@ use_google = st.session_state.get("_use_google", True)
 if uploaded is not None and not use_google:
     df = pd.read_csv(uploaded) if uploaded.name.lower().endswith(".csv") else pd.read_excel(uploaded)
 else:
-    df = load_google_csv(GOOGLE_SHEETS_CSV)
+    df = load_google(GOOGLE_SHEETS_CSV, SPREADSHEET_ID, WORKSHEET_NAME)
 
 if df is None or df.empty:
     st.info("Brak danych – wrzuć plik albo użyj przycisku Google."); st.stop()
@@ -122,17 +151,20 @@ st.subheader("Podgląd danych")
 st.dataframe(df.head(50), width="stretch")
 
 # -------------------- NORMALIZACJA --------------------
-# adresy
+# wymuś obecność kolumn adresowych
 missing_req = [c for c in REQ_ADDR_COLS if c not in df.columns]
 if missing_req:
     st.error(f"Brakuje kolumn: {', '.join(missing_req)} (lub dodaj lat/lon)."); st.stop()
-if "FullAddress" not in df.columns: df["FullAddress"] = build_full_address(df)
 
-# istniejące lat/lon → zamień przecinki na kropki, rzutuj na numeric
-if "lat" in df.columns: df["lat"] = df["lat"].astype(str).str.replace(",", ".")
-if "lon" in df.columns: df["lon"] = df["lon"].astype(str).str.replace(",", ".")
-df["lat"] = pd.to_numeric(df.get("lat"), errors="coerce")
-df["lon"] = pd.to_numeric(df.get("lon"), errors="coerce")
+# FullAddress
+if "FullAddress" not in df.columns:
+    df["FullAddress"] = build_full_address(df)
+
+# lat/lon → kropki, numeric, dtype float64
+if "lat" not in df.columns: df["lat"] = np.nan
+if "lon" not in df.columns: df["lon"] = np.nan
+df["lat"] = pd.to_numeric(df["lat"].astype(str).str.replace(",", "."), errors="coerce").astype("float64")
+df["lon"] = pd.to_numeric(df["lon"].astype(str).str.replace(",", "."), errors="coerce").astype("float64")
 
 def valid_coord(lat, lon):
     try: lat=float(lat); lon=float(lon)
@@ -153,16 +185,25 @@ if len(to_fix_idx) > 0 and not st.session_state.get("geocoded_done", False):
         for i, addr in enumerate(addrs, start=1):
             results.append((addr, geocode_one(addr)))
             prog.progress(i/len(addrs)); time.sleep(0.05)
+
         mapping = {a:c for a,c in results}
-        df.loc[to_fix_idx, "lat"] = df.loc[to_fix_idx,"FullAddress"].map(lambda a: mapping.get(a, (None,None))[0] if mapping.get(a) else None)
-        df.loc[to_fix_idx, "lon"] = df.loc[to_fix_idx,"FullAddress"].map(lambda a: mapping.get(a, (None,None))[1] if mapping.get(a) else None)
+
+        def pick_lat(a): 
+            c = mapping.get(a); return c[0] if c else np.nan
+        def pick_lon(a): 
+            c = mapping.get(a); return c[1] if c else np.nan
+
+        df.loc[to_fix_idx, "lat"] = df.loc[to_fix_idx,"FullAddress"].map(pick_lat).astype("float64")
+        df.loc[to_fix_idx, "lon"] = df.loc[to_fix_idx,"FullAddress"].map(pick_lon).astype("float64")
+
         # finalna walidacja
         bad = ~df.apply(lambda r: valid_coord(r["lat"], r["lon"]), axis=1)
-        df.loc[bad, ["lat","lon"]] = pd.NA
+        df.loc[bad, ["lat","lon"]] = np.nan
 
+        # zapamiętaj do sesji i zapisz do Sheets
         st.session_state["geocoded_done"] = True
         st.session_state["geo_df"] = df.dropna(subset=["lat","lon"]).to_dict(orient="records")
-        # zapis do Sheets
+
         if save_to_google_sheet(df):
             st.success(f"Zapisano współrzędne do Google Sheets (zakładka: {WORKSHEET_NAME}).")
         else:
