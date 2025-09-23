@@ -3,6 +3,7 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 import folium
+from datetime import datetime, timedelta
 from folium.plugins import MarkerCluster
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
@@ -54,26 +55,51 @@ def build_full_address(df: pd.DataFrame) -> pd.Series:
 
 
 # ===================== ODCZYT DANYCH =====================
-@st.cache_data(show_spinner=False, ttl=10)
+@st.cache_data(show_spinner=False, ttl=60)
 def load_google(url_csv: str, spreadsheet_id: str, worksheet_name: str) -> pd.DataFrame:
-    """Czytaj z API (świeże) – fallback na publikowany CSV."""
-    try:
-        if spreadsheet_id and "gcp_service_account" in st.secrets:
-            import gspread
-            from google.oauth2.service_account import Credentials
+    """Czytaj z API (świeże) – fallback na publikowany CSV. Szanuj limity (429) i blokuj próby na 2 min."""
+    # Jeśli wcześniej była blokada 429 – omiń API na chwilę
+    blocked_until = st.session_state.get("sheets_blocked_until")
+    if blocked_until and datetime.utcnow() < blocked_until:
+        st.info(
+            "Limit Google Sheets chwilowo przekroczony – używam publikowanego CSV. "
+            f"Spróbuję API po {blocked_until.strftime('%H:%M:%S')} UTC lub kliknij przycisk poniżej."
+        )
+    else:
+        # Podejście z małym backoffem (do 3 prób), tylko dla odczytu
+        try:
+            if spreadsheet_id and "gcp_service_account" in st.secrets:
+                import gspread
+                from google.oauth2.service_account import Credentials
+                from gspread.exceptions import APIError
 
-            creds = Credentials.from_service_account_info(
-                st.secrets["gcp_service_account"],
-                scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
-            )
-            sh = gspread.authorize(creds).open_by_key(spreadsheet_id)
-            ws = sh.worksheet(worksheet_name)
-            df = pd.DataFrame(ws.get_all_records(numericise_ignore=['all']))
-            if not df.empty:
-                return df
-    except Exception as e:
-        st.warning(f"Odczyt API nieudany ({e}). Próbuję przez publikowany CSV…")
+                creds = Credentials.from_service_account_info(
+                    st.secrets["gcp_service_account"],
+                    scopes=["https://www.googleapis.com/auth/spreadsheets.readonly"],
+                )
+                sh = gspread.authorize(creds).open_by_key(spreadsheet_id)
+                for attempt in range(3):
+                    try:
+                        ws = sh.worksheet(worksheet_name)
+                        df = pd.DataFrame(ws.get_all_records(numericise_ignore=['all']))
+                        if not df.empty:
+                            return df
+                        break
+                    except APIError as e:
+                        msg = str(e)
+                        code = getattr(getattr(e, 'response', None), 'status_code', None)
+                        if code == 429 or ('Quota exceeded' in msg):
+                            wait = min(8, 2 ** attempt)
+                            st.warning(f"Sheets 429 (read). Ponawiam za {wait}s… [próba {attempt+1}/3]")
+                            time.sleep(wait)
+                            continue
+                        raise
+        except Exception as e:
+            st.warning(f"Odczyt API nieudany ({e}). Próbuję przez publikowany CSV…")
+            # Blokuj kolejne próby API na 2 min (mniej spamowania limitu)
+            st.session_state["sheets_blocked_until"] = datetime.utcnow() + timedelta(minutes=2)
 
+    # fallback: CSV (może mieć opóźnienie)
     r = requests.get(url_csv, timeout=30, headers={"User-Agent": "Mozilla/5.0"})
     r.raise_for_status()
     b = r.content
@@ -118,6 +144,8 @@ def save_to_google_sheet(df_to_save: pd.DataFrame) -> bool:
                     continue
                 raise
         st.error("Przekroczono limit Google Sheets – nie udało się zapisać po 5 próbach.")
+        # Zablokuj dalsze próby API zapisu/odczytu na 2 minuty, by nie spamować limitu
+        st.session_state["sheets_blocked_until"] = datetime.utcnow() + timedelta(minutes=2)
         return False
     except Exception as e:
         st.error(f"Nie udało się zapisać do Google Sheets: {e}")
@@ -182,6 +210,16 @@ if source == "Plik (upload)":
     uploaded = st.file_uploader("Wgraj plik (Excel/CSV)", type=["xlsx", "csv"])
 
 st.divider()
+
+# Info i przełącznik odblokowania API po 429
+if st.session_state.get("sheets_blocked_until"):
+    col_a, col_b = st.columns([3,1])
+    with col_a:
+        st.caption("⏳ Google Sheets API tymczasowo zablokowane (429). Używany jest fallback CSV.")
+    with col_b:
+        if st.button("🔄 Spróbuj API teraz"):
+            st.session_state.pop("sheets_blocked_until", None)
+            st.rerun()
 
 # ===================== WCZYTANIE DANYCH =====================
 if source == "Google Sheet":
