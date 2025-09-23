@@ -8,6 +8,8 @@ from streamlit_folium import st_folium
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
 import requests
+import math
+import numpy as np
 
 st.set_page_config(page_title="Mapa z Excela (Google Sheets)", layout="wide")
 st.title("📍 Mapa klientów z Excela / Google Sheets (online, free)")
@@ -26,6 +28,27 @@ Jeśli podasz **lat** i **lon** w danych, geokodowanie jest pomijane.
 # ---------- Helpers ----------
 REQ_ADDR_COLS = ["Adres", "Miasto", "PSC"]
 
+def to_float_or_none(x):
+    """Zamień '123 456,78' / '123,45' / '123.45' -> float; dla śmieci zwróć None."""
+    try:
+        if x is None or (isinstance(x, float) and math.isnan(x)):
+            return None
+        s = str(x).strip().replace("\xa0", " ").replace(" ", "")
+        # zamień przecinek na kropkę (format EU -> kropka)
+        s = s.replace(",", ".")
+        return float(s)
+    except Exception:
+        return None
+
+def fmt_czk(x):
+    v = to_float_or_none(x)
+    if v is None:
+        return ""
+    # format z dwoma miejscami; zamień separator tysięcy na spację, a kropkę na przecinek
+    txt = f"{v:,.2f}"          # np. '123,456.78'
+    txt = txt.replace(",", " ").replace(".", ",")  # -> '123 456,78'
+    return f"Obrót: {txt} CZK"
+    
 def norm_col(s: pd.Series) -> pd.Series:
     return (
         s.fillna("")
@@ -233,7 +256,7 @@ for _, r in geo_df.dropna(subset=["lat","lon"]).iterrows():
     popup_html = f"""
     <div style="font-size:14px">
       <b>{val('Nazwa odbiorcy', r)}</b><br>
-      {('Obrót: {:,.2f} CZK'.format(val('Obrót w czk', r)) if pd.notna(val('Obrót w czk', r)) else '')}<br>
+      {amount_text}<br>
       {('Email: ' + val('email', r)) if val('email', r) else ''}<br>
       {('Adres: ' + val('FullAddress', r)) if 'FullAddress' in geo_df.columns else ''}
     </div>
