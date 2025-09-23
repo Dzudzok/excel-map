@@ -138,13 +138,24 @@ for c in REQ_ADDR_COLS:
         st.error(f"Brakuje kolumny: {c}")
         st.stop()
 
-# FullAddress
+# FullAddress – zawsze budujemy/uzupełniamy z Adres + Miasto + PSC
+built_full = build_full_address(df)
 if "FullAddress" not in df.columns:
-    df["FullAddress"] = build_full_address(df)
+    df["FullAddress"] = built_full
+else:
+    # jeśli w arkuszu było puste/"None"/"nan" – nadpisz tymczasowo zbudowaną wartością
+    mask_blank = df["FullAddress"].astype(str).str.strip().isin(["", "None", "nan", "NaN", "NONE"]) | df["FullAddress"].isna()
+    df.loc[mask_blank, "FullAddress"] = built_full[mask_blank]
 
 # Wszystkie rekordy wymagają geokodowania
 st.subheader("Podgląd danych")
-st.dataframe(df.head(50), width="stretch")
+# Pokaż podgląd bez kolumn lat/lon (nawet jeśli są w arkuszu)
+preview_cols_order = ["lp", "Nazwa odbiorcy", "Obrót w czk", "email", "Adres", "Miasto", "PSC", "FullAddress"]
+show_cols = [c for c in preview_cols_order if c in df.columns]
+if show_cols:
+    st.dataframe(df[show_cols].head(50), width="stretch")
+else:
+    st.dataframe(df.head(50), width="stretch")
 
 st.warning("Geokodowanie wszystkich adresów (OSM/Nominatim, ~1 zapytanie/s)")
 if auto_geocode or st.button("Geokoduj teraz"):
@@ -163,6 +174,7 @@ if auto_geocode or st.button("Geokoduj teraz"):
     df = df.dropna(subset=["lat","lon"]).copy()
     st.session_state["geo_df"] = df.to_dict(orient="records")
     st.success("Geokodowanie zakończone – dane gotowe do mapy.")
+st.rerun()
 
 # Dane z poprawnymi współrzędnymi
 geo_df = pd.DataFrame(st.session_state.get("geo_df", []))
