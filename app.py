@@ -376,15 +376,36 @@ FAST_RENDER = st.toggle("🚀 Tryb szybki (bez odświeżania przy ruchu mapy)", 
 
 
 # Mapa
+# Mapa
 st.markdown("### Mapa")
-m = make_map(df_geo, thresholds, colors)
-if FAST_RENDER:
-    # Statyczny HTML — zero rerunów przy pan/zoom
-    components.html(m.get_root().render(), height=700, scrolling=False)
+# Twarda walidacja zakresów – wytnij śmieci zanim trafią na mapę
+valid_lat = df_geo["lat"].between(47, 55) | df_geo["lat"].isna()
+valid_lon = df_geo["lon"].between(11, 25) | df_geo["lon"].isna()
+bad = (~valid_lat) | (~valid_lon)
+if bad.any():
+    st.sidebar.warning(f"🧹 Pominięto {bad.sum()} rekordów z koordynatami poza zakresem CZ (lat 47–55, lon 11–25).")
+    df_geo = df_geo.where(valid_lat & valid_lon)
+
+m = None
+try:
+    m = make_map(df_geo, thresholds, colors)
+except Exception as e:
+    st.error(f"❌ Błąd w make_map: {e}")
+
+if m is None:
+    st.warning("Brak mapy do wyświetlenia (puste dane lub błąd tworzenia mapy).")
 else:
-    # Interaktywny tryb (może „migać”, bo wysyła eventy do Streamlita)
-    from streamlit_folium import st_folium
-    st_folium(m, width=None, height=700, key="live_map")
+    try:
+        if FAST_RENDER:
+            # Statyczny HTML — zero rerunów przy pan/zoom
+            html = m.get_root().render() if hasattr(m, "get_root") else m._repr_html_()
+            components.html(html, height=700, scrolling=False)
+        else:
+            from streamlit_folium import st_folium
+            st_folium(m, width=None, height=700, key="live_map")
+    except Exception as e:
+        st.error(f"❌ Błąd renderowania mapy: {e}")
+
 
 
 # Podsumowanie
