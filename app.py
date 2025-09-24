@@ -26,7 +26,29 @@ def parse_czk(x) -> float:
     except:
         return float("nan")
 
-
+def _normalize_coord(series: pd.Series) -> pd.Series:
+    # zamień przecinki na kropki, usuń spacje i twarde spacje, puste -> NaN
+    s = series.astype(str).str.strip()
+    s = s.replace({"": None, "None": None, "nan": None})
+    s = s.str.replace("\xa0", " ", regex=False)  # twarde spacje
+    s = s.str.replace(" ", "", regex=False)      # separatory tysięcy
+    s = s.str.replace(",", ".", regex=False)     # przecinek -> kropka
+    return pd.to_numeric(s, errors="coerce")
+    
+def _fix_deg_range(val: float, is_lat: bool) -> float:
+    """Sprowadza wartość do zakresu stopni: lat ∈ [-90,90], lon ∈ [-180,180].
+    Jeśli liczba jest za duża (np. 498651463), dzielimy przez 10 aż wejdzie w zakres."""
+    if pd.isna(val):
+        return val
+    limit = 90.0 if is_lat else 180.0
+    v = float(val)
+    # zmniejszaj przez 10 dopóki poza zakresem i nadal sensownie duża
+    while abs(v) > limit and abs(v) >= 1:
+        v /= 10.0
+    # jeśli wciąż poza zakresem – uznaj za brak
+    if abs(v) > limit:
+        return float("nan")
+    return v
 
 # === USTAWIENIA ===
 st.set_page_config(page_title="Mapa klientów z Excela / Google Sheets", layout="wide")
@@ -72,9 +94,10 @@ def load_data() -> pd.DataFrame:
         if col not in df.columns:
             df[col] = ""
 
+
     # normalizacja współrzędnych
-    df["lat"] = _normalize_coord(df["lat"])
-    df["lon"] = _normalize_coord(df["lon"])
+    df["lat"] = _normalize_coord(df["lat"]).apply(lambda x: _fix_deg_range(x, is_lat=True))
+    df["lon"] = _normalize_coord(df["lon"]).apply(lambda x: _fix_deg_range(x, is_lat=False))
     return df
 
 
@@ -88,15 +111,7 @@ def build_full_address(row: pd.Series) -> str:
 
 
 
-def _normalize_coord(series: pd.Series) -> pd.Series:
-    # zamień przecinki na kropki, usuń spacje i twarde spacje, puste -> NaN
-    s = series.astype(str).str.strip()
-    s = s.replace({"": None, "None": None, "nan": None})
-    s = s.str.replace("\xa0", " ", regex=False)  # twarde spacje
-    s = s.str.replace(" ", "", regex=False)      # separatory tysięcy
-    s = s.str.replace(",", ".", regex=False)     # przecinek -> kropka
-    return pd.to_numeric(s, errors="coerce")
-    
+
 def row_key(row: pd.Series) -> str:
     # Klucz oparty o pełny adres + nazwę odbiorcy
     base = (build_full_address(row) + "|" + str(row.get("Nazwa odbiorcy",""))).strip()
