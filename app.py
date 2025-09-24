@@ -331,7 +331,7 @@ with st.sidebar:
     colors = []
 
     for i in range(4):  # możesz zmienić liczbę progów
-        thr = st.number_input(f"Próg {i+1} (CZK)", min_value=0, value=0 if i==0 else (5000*i), step=1000, key=f"thr_{i}")
+        thr = st.number_input(f"Próg {i+1} (CZK)", min_value=0, value=0 if i==0 else (5000*i), step=2000, key=f"thr_{i}")
         col = st.color_picker(f"Kolor {i+1}", value=["#FF0000", "#FF7A00", "#1E7B00", "#14FF00"][i], key=f"col_{i}")
         thresholds.append(thr)
         colors.append(col)
