@@ -59,21 +59,30 @@ _geolocator = Nominatim(user_agent="mroauto-excel-map")
 _geocode = RateLimiter(_geolocator.geocode, min_delay_seconds=1, max_retries=2, swallow_exceptions=True)
 
 @st.cache_data(show_spinner=False)
-def load_csv(url: str) -> pd.DataFrame:
-    df = pd.read_csv(url, dtype=str).fillna("")
+def load_data() -> pd.DataFrame:
+    import gspread
+    from google.oauth2.service_account import Credentials
 
-    # Uporządkuj nagłówki
+    scope = [
+        "https://www.googleapis.com/auth/spreadsheets.readonly",
+        "https://www.googleapis.com/auth/drive.readonly",
+    ]
+    creds = Credentials.from_service_account_info(st.secrets["gcp_service_account"], scopes=scope)
+    gc = gspread.authorize(creds)
+    sh = gc.open_by_key(st.secrets["SPREADSHEET_ID"])
+    ws = sh.worksheet(st.secrets["WORKSHEET_NAME"])
+
+    df = pd.DataFrame(ws.get_all_records())  # prywatny odczyt, żadnego public CSV
     df.columns = df.columns.str.strip()
 
-    # Upewnij się, że wymagane kolumny istnieją
+    # zapewnij kolumny
     for col in ["lp.", "Nazwa odbiorcy", "Obrót w czk", "email", "Adres", "Miasto", "PSC", "lat", "lon"]:
         if col not in df.columns:
             df[col] = ""
 
-    # Normalizacja współrzędnych (przecinki -> kropki, itp.)
+    # normalizacja współrzędnych
     df["lat"] = _normalize_coord(df["lat"])
     df["lon"] = _normalize_coord(df["lon"])
-
     return df
 
 
@@ -248,6 +257,15 @@ def get_color_for_value(value: float, thresholds, colors) -> str:
 # === UI ===
 st.title("🗺️ Mapa klientów z Google Sheets (CSV)")
 
+# 🔒 Prosta ochrona hasłem (na już; docelowo SSO przez IAP)
+REQUIRE_PASSWORD = True
+if REQUIRE_PASSWORD:
+    pwd = st.sidebar.text_input("Hasło dostępu", type="password")
+    if pwd != st.secrets.get("APP_PASSWORD", "changeme"):
+        st.warning("Podaj prawidłowe hasło, aby zobaczyć mapę.")
+        st.stop()
+
+
 with st.sidebar:
     st.subheader("Źródło danych")
     st.code(CSV_URL, language="text")
@@ -270,7 +288,8 @@ with st.sidebar:
     colors = list(col_sorted)
 
 
-df_orig = load_csv(CSV_URL)
+df_orig = load_data()
+
 df_orig["obr_czk"] = df_orig["Obrót w czk"].apply(parse_czk)
 
 st.markdown("#### Podgląd danych (pierwsze 20 wierszy)")
