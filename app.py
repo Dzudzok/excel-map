@@ -14,17 +14,32 @@ from geopy.extra.rate_limiter import RateLimiter
 import re
 
 def parse_czk(x) -> float:
-    s = str(x).strip()
-    if not s or s.lower() in ("nan", "none"):
+    raw = str(x).strip()
+    if not raw or raw.lower() in ("nan", "none"):
         return float("nan")
-    s = s.replace("\xa0", " ")      # twarde spacje
-    s = s.replace(" ", "")          # usuń separatory tysięcy
-    s = s.replace(",", ".")         # CZ/PL przecinek => kropka
-    s = re.sub(r"[^0-9.\-]", "", s) # wywal znaki walut itp.
+
+    # zapamiętaj, czy w oryginale był separator
+    has_comma = "," in raw
+    has_dot = "." in raw
+
+    s = raw.replace("\xa0", " ")   # twarde spacje
+    s = s.replace(" ", "")         # separatory tysięcy
+    s = s.replace(",", ".")        # przecinek -> kropka
+    s = re.sub(r"[^0-9.\-]", "", s)
+
     try:
-        return float(s)
-    except:
+        val = float(s)
+    except Exception:
         return float("nan")
+
+    # Heurystyka: jeśli w ogóle nie było separatora i same cyfry -> to pewnie "grosze"
+    # np. "48711" => 487.11
+    if not has_comma and not has_dot and re.fullmatch(r"-?\d+", raw):
+        if abs(val) >= 100:
+            val = val / 100.0
+
+    return val
+
 
 def fmt_czk(val) -> str:
     """Format CZK: spacja tys., przecinek dzies., 2 miejsca."""
