@@ -7,7 +7,7 @@ import streamlit.components.v1 as components
 import pandas as pd
 import streamlit as st
 import folium
-from folium.plugins import MarkerCluster
+from folium.plugins import MarkerCluster, Fullscreen
 from geopy.geocoders import Nominatim
 from geopy.extra.rate_limiter import RateLimiter
 
@@ -260,6 +260,15 @@ def make_map(df: pd.DataFrame, thresholds, colors) -> folium.Map:
     center = (dd["lat"].mean(), dd["lon"].mean())
     m = folium.Map(location=center, zoom_start=7, control_scale=True)
     cluster = MarkerCluster().add_to(m)
+    Fullscreen(
+        position="topright",
+        title="Pełny ekran",
+        title_cancel="Wyjdź z pełnego ekranu",
+        force_separate_button=True
+    ).add_to(m)
+
+
+
 
     # --- lokalny formatter popupu (WEWNĄTRZ make_map) ---
     def fmt_popup(r: pd.Series) -> str:
@@ -421,7 +430,13 @@ else:
         st.error(f"❌ Błąd renderowania mapy: {e}")
 
 
-
+html_map = m.get_root().render()
+st.download_button(
+    "⬇️ Pobierz mapę (HTML)",
+    data=html_map,
+    file_name="mapa-klientow.html",
+    mime="text/html"
+)
 # Podsumowanie
 missing_after = df_geo["lat"].isna() | df_geo["lon"].isna()
 st.info(
