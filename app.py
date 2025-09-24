@@ -26,6 +26,20 @@ def parse_czk(x) -> float:
     except:
         return float("nan")
 
+def fmt_czk(val) -> str:
+    """Format CZK: spacja tys., przecinek dzies. i 2 miejsca."""
+    if val is None or (isinstance(val, float) and pd.isna(val)):
+        return ""
+    try:
+        x = float(val)
+    except Exception:
+        return str(val)
+    s = f"{x:,.2f}"              # 1,234,567.89
+    s = s.replace(",", " ")      # 1 234 567.89
+    s = s.replace(".", ",")      # 1 234 567,89
+    return s
+
+
 def _normalize_coord(series: pd.Series) -> pd.Series:
     # zamień przecinki na kropki, usuń spacje i twarde spacje, puste -> NaN
     s = series.astype(str).str.strip()
@@ -234,9 +248,10 @@ def make_map(df: pd.DataFrame, thresholds, colors) -> folium.Map:
     def fmt_popup(r: pd.Series) -> str:
         lines = []
         lines.append(f"<b>{r.get('Nazwa odbiorcy','').strip()}</b>")
-        obr_txt = str(r.get("Obrót w czk", "")).strip()
-        if obr_txt:
-            lines.append(f"Obrót: {obr_txt} CZK")
+            obr_val = r.get("obr_czk", float("nan"))
+            obr_txt = fmt_czk(obr_val)
+            if obr_txt:
+                lines.append(f"Obrót: {obr_txt} CZK")
         email = str(r.get("email", "")).strip()
         if email:
             lines.append(f"Email: {email}")
