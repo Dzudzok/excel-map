@@ -239,32 +239,33 @@ def make_map(df: pd.DataFrame, thresholds, colors) -> folium.Map:
     dd = df.dropna(subset=["lat", "lon"]).copy()
 
     if dd.empty:
-        center = (49.820, 15.470)
+        center = (49.820, 15.470)  # środek CZ
         return folium.Map(location=center, zoom_start=7, control_scale=True)
 
     center = (dd["lat"].mean(), dd["lon"].mean())
     m = folium.Map(location=center, zoom_start=7, control_scale=True)
     cluster = MarkerCluster().add_to(m)
 
-def fmt_popup(r: pd.Series) -> str:
-    lines = []
-    name = str(r.get("Nazwa odbiorcy", "")).strip()
-    if name:
-        lines.append(f"<b>{name}</b>")
+    # --- lokalny formatter popupu (WEWNĄTRZ make_map) ---
+    def fmt_popup(r: pd.Series) -> str:
+        lines = []
+        name = str(r.get("Nazwa odbiorcy", "")).strip()
+        if name:
+            lines.append(f"<b>{name}</b>")
 
-    obr_val = r.get("obr_czk", float("nan"))
-    obr_txt = fmt_czk(obr_val)
-    if obr_txt:
-        lines.append(f"Obrót: {obr_txt} CZK")
+        obr_val = r.get("obr_czk", float("nan"))
+        obr_txt = fmt_czk(obr_val)
+        if obr_txt:
+            lines.append(f"Obrót: {obr_txt} CZK")
 
-    email = str(r.get("email", "")).strip()
-    if email:
-        lines.append(f"Email: {email}")
+        email = str(r.get("email", "")).strip()
+        if email:
+            lines.append(f"Email: {email}")
 
-    lines.append(build_full_address(r))
-    return "<br>".join(lines)
+        lines.append(build_full_address(r))
+        return "<br>".join(lines)
 
-
+    # --- MARKERY ---
     for _, r in dd.iterrows():
         val = r.get("obr_czk", float("nan"))
         color = get_color_for_value(val, thresholds, colors)
@@ -278,12 +279,10 @@ def fmt_popup(r: pd.Series) -> str:
             fill_color=color,
             fill_opacity=0.9,
             popup=popup_html,
-            tooltip=r.get("Nazwa odbiorcy", "")
+            tooltip=str(r.get("Nazwa odbiorcy", "")).strip(),
         ).add_to(cluster)
 
     return m
-
-
 
 def get_color_for_value(value: float, thresholds, colors) -> str:
     if pd.isna(value):
