@@ -27,17 +27,18 @@ def parse_czk(x) -> float:
         return float("nan")
 
 def fmt_czk(val) -> str:
-    """Format CZK: spacja tys., przecinek dzies. i 2 miejsca."""
+    """Format CZK: spacja tys., przecinek dzies., 2 miejsca."""
     if val is None or (isinstance(val, float) and pd.isna(val)):
         return ""
     try:
         x = float(val)
     except Exception:
         return str(val)
-    s = f"{x:,.2f}"              # 1,234,567.89
-    s = s.replace(",", " ")      # 1 234 567.89
-    s = s.replace(".", ",")      # 1 234 567,89
+    s = f"{x:,.2f}"       # 1,234,567.89
+    s = s.replace(",", " ")  # 1 234 567.89
+    s = s.replace(".", ",")  # 1 234 567,89
     return s
+
 
 
 def _normalize_coord(series: pd.Series) -> pd.Series:
@@ -245,18 +246,24 @@ def make_map(df: pd.DataFrame, thresholds, colors) -> folium.Map:
     m = folium.Map(location=center, zoom_start=7, control_scale=True)
     cluster = MarkerCluster().add_to(m)
 
-    def fmt_popup(r: pd.Series) -> str:
-        lines = []
-        lines.append(f"<b>{r.get('Nazwa odbiorcy','').strip()}</b>")
-            obr_val = r.get("obr_czk", float("nan"))
-            obr_txt = fmt_czk(obr_val)
-            if obr_txt:
-                lines.append(f"Obrót: {obr_txt} CZK")
-        email = str(r.get("email", "")).strip()
-        if email:
-            lines.append(f"Email: {email}")
-        lines.append(build_full_address(r))
-        return "<br>".join(lines)
+def fmt_popup(r: pd.Series) -> str:
+    lines = []
+    name = str(r.get("Nazwa odbiorcy", "")).strip()
+    if name:
+        lines.append(f"<b>{name}</b>")
+
+    obr_val = r.get("obr_czk", float("nan"))
+    obr_txt = fmt_czk(obr_val)
+    if obr_txt:
+        lines.append(f"Obrót: {obr_txt} CZK")
+
+    email = str(r.get("email", "")).strip()
+    if email:
+        lines.append(f"Email: {email}")
+
+    lines.append(build_full_address(r))
+    return "<br>".join(lines)
+
 
     for _, r in dd.iterrows():
         val = r.get("obr_czk", float("nan"))
