@@ -26,6 +26,16 @@ def parse_czk(x) -> float:
     except:
         return float("nan")
 
+def _normalize_coord(series: pd.Series) -> pd.Series:
+    # zamień przecinki na kropki, usuń spacje i twarde spacje, puste -> NaN
+    s = series.astype(str).str.strip()
+    s = s.replace({"": None, "None": None, "nan": None})
+    s = s.str.replace("\xa0", " ", regex=False)  # twarde spacje
+    s = s.str.replace(" ", "", regex=False)      # separatory tysięcy
+    s = s.str.replace(",", ".", regex=False)     # przecinek -> kropka
+    return pd.to_numeric(s, errors="coerce")
+
+
 # === USTAWIENIA ===
 st.set_page_config(page_title="Mapa klientów z Excela / Google Sheets", layout="wide")
 if "saved_latlon_keys" not in st.session_state:
@@ -51,14 +61,22 @@ _geocode = RateLimiter(_geolocator.geocode, min_delay_seconds=1, max_retries=2, 
 @st.cache_data(show_spinner=False)
 def load_csv(url: str) -> pd.DataFrame:
     df = pd.read_csv(url, dtype=str).fillna("")
-    # Zapewnij obecność kolumn
+
+    # Uporządkuj nagłówki
+    df.columns = df.columns.str.strip()
+
+    # Upewnij się, że wymagane kolumny istnieją
     for col in ["lp.", "Nazwa odbiorcy", "Obrót w czk", "email", "Adres", "Miasto", "PSC", "lat", "lon"]:
         if col not in df.columns:
             df[col] = ""
-    # Współrzędne jako numery (jeśli są)
-    df["lat"] = pd.to_numeric(df["lat"], errors="coerce")
-    df["lon"] = pd.to_numeric(df["lon"], errors="coerce")
+
+    # Normalizacja współrzędnych (przecinki -> kropki, itp.)
+    df["lat"] = _normalize_coord(df["lat"])
+    df["lon"] = _normalize_coord(df["lon"])
+
     return df
+
+
 
 def build_full_address(row: pd.Series) -> str:
     parts = [str(row.get("Adres", "")).strip(),
@@ -260,7 +278,12 @@ st.dataframe(df_orig.head(20), use_container_width=True)
 
 # Geokodowanie braków
 st.markdown("### Geokodowanie brakujących współrzędnych")
-df_geo = geocode_missing(df_orig)
+GEOCODE_ENABLED = st.sidebar.toggle("Geokoduj brakujące adresy", value=False,
+                                    help="W produkcji wyłączone. Włącz tylko, gdy chcesz uzupełnić nowe braki.")
+df_geo = geocode_missing(df_orig) if GEOCODE_ENABLED else df_orig.copy()
+
+ready = df_geo["lat"].notna() & df_geo["lon"].notna()
+st.sidebar.info(f"✅ Współrzędne gotowe: {ready.sum()}  |  ❓ Do geokodowania: {(~ready).sum()}")
 
 # Opcjonalny zapis do arkusza
 updated_rows = 0
