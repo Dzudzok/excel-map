@@ -35,20 +35,22 @@ def _normalize_coord(series: pd.Series) -> pd.Series:
     s = s.str.replace(",", ".", regex=False)     # przecinek -> kropka
     return pd.to_numeric(s, errors="coerce")
     
-def _fix_deg_range(val: float, is_lat: bool) -> float:
-    """Sprowadza wartość do zakresu stopni: lat ∈ [-90,90], lon ∈ [-180,180].
-    Jeśli liczba jest za duża (np. 498651463), dzielimy przez 10 aż wejdzie w zakres."""
+def _fix_deg_cz(val: float, is_lat: bool) -> float:
+    """Skaluje liczby bez kropki (np. 174.6642 -> 17.46642, 498651463 -> 49.8651463)
+    i odrzuca wartości poza realnym zakresem dla CZ."""
     if pd.isna(val):
         return val
-    limit = 90.0 if is_lat else 180.0
     v = float(val)
-    # zmniejszaj przez 10 dopóki poza zakresem i nadal sensownie duża
-    while abs(v) > limit and abs(v) >= 1:
-        v /= 10.0
-    # jeśli wciąż poza zakresem – uznaj za brak
-    if abs(v) > limit:
-        return float("nan")
-    return v
+    if is_lat:
+        # dopóki za duże – dziel przez 10
+        while abs(v) > 60:
+            v /= 10.0
+        # finalny check CZ
+        return v if 47.0 <= v <= 55.0 else float("nan")
+    else:
+        while abs(v) > 30:
+            v /= 10.0
+        return v if 11.0 <= v <= 25.0 else float("nan")
 
 # === USTAWIENIA ===
 st.set_page_config(page_title="Mapa klientów z Excela / Google Sheets", layout="wide")
@@ -96,8 +98,8 @@ def load_data() -> pd.DataFrame:
 
 
     # normalizacja współrzędnych
-    df["lat"] = _normalize_coord(df["lat"]).apply(lambda x: _fix_deg_range(x, is_lat=True))
-    df["lon"] = _normalize_coord(df["lon"]).apply(lambda x: _fix_deg_range(x, is_lat=False))
+    df["lat"] = _normalize_coord(df["lat"]).apply(lambda x: _fix_deg_cz(x, is_lat=True))
+    df["lon"] = _normalize_coord(df["lon"]).apply(lambda x: _fix_deg_cz(x, is_lat=False))
     return df
 
 
@@ -316,6 +318,15 @@ st.markdown("### Geokodowanie brakujących współrzędnych")
 GEOCODE_ENABLED = st.sidebar.toggle("Geokoduj brakujące adresy", value=False,
                                     help="W produkcji wyłączone. Włącz tylko, gdy chcesz uzupełnić nowe braki.")
 df_geo = geocode_missing(df_orig) if GEOCODE_ENABLED else df_orig.copy()
+# Odfiltruj ew. śmieci spoza CZ (gdyby coś jeszcze się prześlizgnęło)
+bad_lat = df_geo["lat"].notna() & ~df_geo["lat"].between(47, 55)
+bad_lon = df_geo["lon"].notna() & ~df_geo["lon"].between(11, 25)
+bad_rows = (bad_lat | bad_lon).sum()
+if bad_rows:
+    st.sidebar.warning(f"🧹 Pominięto z mapy {bad_rows} rekordów z koordynatami poza CZ.")
+    df_geo.loc[bad_lat, "lat"] = float("nan")
+    df_geo.loc[bad_lon, "lon"] = float("nan")
+
 
 ready = df_geo["lat"].notna() & df_geo["lon"].notna()
 st.sidebar.info(f"✅ Współrzędne gotowe: {ready.sum()}  |  ❓ Do geokodowania: {(~ready).sum()}")
