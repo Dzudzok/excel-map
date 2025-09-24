@@ -26,14 +26,6 @@ def parse_czk(x) -> float:
     except:
         return float("nan")
 
-def _normalize_coord(series: pd.Series) -> pd.Series:
-    # zamień przecinki na kropki, usuń spacje i twarde spacje, puste -> NaN
-    s = series.astype(str).str.strip()
-    s = s.replace({"": None, "None": None, "nan": None})
-    s = s.str.replace("\xa0", " ", regex=False)  # twarde spacje
-    s = s.str.replace(" ", "", regex=False)      # separatory tysięcy
-    s = s.str.replace(",", ".", regex=False)     # przecinek -> kropka
-    return pd.to_numeric(s, errors="coerce")
 
 
 # === USTAWIENIA ===
@@ -96,6 +88,15 @@ def build_full_address(row: pd.Series) -> str:
 
 
 
+def _normalize_coord(series: pd.Series) -> pd.Series:
+    # zamień przecinki na kropki, usuń spacje i twarde spacje, puste -> NaN
+    s = series.astype(str).str.strip()
+    s = s.replace({"": None, "None": None, "nan": None})
+    s = s.str.replace("\xa0", " ", regex=False)  # twarde spacje
+    s = s.str.replace(" ", "", regex=False)      # separatory tysięcy
+    s = s.str.replace(",", ".", regex=False)     # przecinek -> kropka
+    return pd.to_numeric(s, errors="coerce")
+    
 def row_key(row: pd.Series) -> str:
     # Klucz oparty o pełny adres + nazwę odbiorcy
     base = (build_full_address(row) + "|" + str(row.get("Nazwa odbiorcy",""))).strip()
